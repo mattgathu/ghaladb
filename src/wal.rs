@@ -1,12 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 use std::{
+    convert::identity,
     fs::{File, OpenOptions},
-    io::{BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
     path::Path,
+    path::PathBuf,
 };
 
-use crate::{error::GhalaDbResult, memtable::OpType};
+use crate::{
+    error::{GhalaDBError, GhalaDbResult},
+    memtable::{Bytes, EntryType, KeyRef},
+};
 
 pub trait WriteAheadLog {
     fn flush(&mut self) -> GhalaDbResult<()>;
@@ -14,18 +19,23 @@ pub trait WriteAheadLog {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct LogRecord<'a> {
-    pub key: &'a str,
-    pub val: &'a str,
-    pub tag: OpType,
+pub struct LogRecord {
+    pub key: Bytes,
+    pub val: Option<Bytes>,
+    pub tag: EntryType,
 }
-impl<'a> LogRecord<'a> {
-    pub fn new(key: &'a str, val: &'a str, tag: OpType) -> LogRecord<'a> {
-        LogRecord { key, val, tag }
+impl LogRecord {
+    pub fn new(key: KeyRef, val: Option<Bytes>, tag: EntryType) -> LogRecord {
+        LogRecord {
+            key: key.to_vec(),
+            val,
+            tag,
+        }
     }
 }
 pub struct OnDiskWal {
     f: BufWriter<File>,
+    path: PathBuf,
 }
 
 impl OnDiskWal {
@@ -36,13 +46,16 @@ impl OnDiskWal {
             .write(true)
             .create(true)
             .append(true)
-            .open(wal_path)?;
+            .open(wal_path.clone())?;
         Ok(OnDiskWal {
+            //TODO: provide db option to set WAL size capacity
+            // and use `with_capacity` to create buffer
             f: BufWriter::new(f),
+            path: wal_path,
         })
     }
 
-    //TODO
+    // FIXME
     // avoid flushing all the time
     // use a size limit + a timeout
     // if size is big enough or timeout as expired, flush to disk
@@ -50,6 +63,18 @@ impl OnDiskWal {
         self.f.write_all(&bincode::serialize(&record)?)?;
         self.f.write_all(b"\n")?;
         Ok(())
+    }
+
+    #[allow(unused)]
+    pub fn entries(&self) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<LogRecord>>> {
+        let buf = BufReader::new(File::open(self.path.clone())?);
+        Ok(buf.split(b'\n').map(|l| {
+            l.map(|li| {
+                bincode::deserialize::<LogRecord>(&li).map_err(|e| GhalaDBError::SerdeError(e))
+            })
+            .map_err(|e| GhalaDBError::IOError(e))
+            .and_then(identity)
+        }))
     }
 
     fn flush(&mut self) -> GhalaDbResult<()> {

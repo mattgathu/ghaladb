@@ -1,158 +1,300 @@
-#![allow(dead_code)]
+use serde::{Deserialize, Serialize};
+pub(crate) use std::collections::btree_map::IntoIter;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::BufReader;
+use std::io::BufWriter;
+use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-//use std::thread;
-//
-//
 
-use crate::error::GhalaDbResult;
-use crate::memtable::{BTreeMemTable, MemTable, OpType};
+use crate::error::{GhalaDBError, GhalaDbResult};
+use crate::memtable::{BTreeMemTable, Bytes, EntryType, KeyRef, MemTable, ValueEntry};
 
 const FOOTER_SIZE: i64 = 8;
 
-pub type SstIndex = BTreeMap<String, (usize, usize, OpType)>;
-pub trait SSTable {
-    fn get(&mut self, key: &str) -> GhalaDbResult<Option<String>>;
-    fn len(&self) -> usize;
-    fn size(self) -> usize;
-    //fn iter(&self) -> SSTableIter;
+pub type SstIndex = BTreeMap<Bytes, IndexVal>;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct IndexVal {
+    offset: u64,
+    len: usize,
+    entry_type: EntryType,
+}
+impl IndexVal {
+    pub fn new(offset: u64, len: usize, entry_type: EntryType) -> IndexVal {
+        Self {
+            offset,
+            len,
+            entry_type,
+        }
+    }
 }
 
-// Things to implement:
-// creation from memtable
-// - key-val blocks
-// - metadata blocks
-// - stats meta block
-// - fixed length footer
-//      - ref metadata/indices
-// ref: https://github.com/google/leveldb/blob/master/doc/table_format.md
-pub struct NaiveSSTable {
-    path: PathBuf,
-    //TODO: since values are meant to be small, we can use isize for the length and
-    // have a negative value for tombstones, thereby eliminating the OpType in the index
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SstMetadata {
     index: SstIndex,
-    name: String,
+    seq_num: u64,
 }
 
-impl NaiveSSTable {
-    pub fn new(path: PathBuf, index: SstIndex, name: String) -> NaiveSSTable {
-        NaiveSSTable { path, index, name }
+#[derive(Debug)]
+pub(crate) struct SSTable {
+    pub path: PathBuf,
+    pub index: SstIndex,
+    first_key: Bytes,
+    last_key: Bytes,
+    mem_size: usize,
+    pub seq_num: u64,
+    rdr: BufReader<File>,
+    pub active: bool,
+}
+
+impl SSTable {
+    pub fn new(path: PathBuf, index: SstIndex, seq_num: u64, rdr: BufReader<File>) -> SSTable {
+        debug_assert!(!index.is_empty());
+        let first_key = index.keys().next().unwrap().to_owned();
+        let last_key = index.keys().last().unwrap().to_owned();
+        let mem_size: usize = index.iter().map(|(k, v)| k.len() + v.len).sum();
+        SSTable {
+            path,
+            index,
+            first_key,
+            last_key,
+            mem_size,
+            seq_num,
+            rdr,
+            active: true,
+        }
     }
 
-    pub fn from_path<P: AsRef<Path>>(path: P) -> GhalaDbResult<NaiveSSTable> {
-        let mut reader = BufReader::new(OpenOptions::new().read(true).open(&path)?);
-        // read footer
-        // - seek to end - footer_sz
-        reader.seek(SeekFrom::End(-FOOTER_SIZE))?;
-        let mut buf = vec![];
-        let _ = reader.read_to_end(&mut buf)?;
-        let footer: [u8; 8] = buf.try_into().expect("footer size not 8");
-        let index_sz = usize::from_le_bytes(footer) as i64;
+    pub fn from_path<P: AsRef<Path>>(path: P) -> GhalaDbResult<SSTable> {
+        let meta = Self::load_meta(&path)?;
+        let reader = Self::get_rdr(&path)?;
 
-        // load index
-        let index_offst = 0i64 - (index_sz + FOOTER_SIZE);
-        reader.seek(SeekFrom::End(index_offst))?;
-        let mut buf = vec![0u8; index_sz as usize];
-        reader.read_exact(&mut buf)?;
-        let index: SstIndex = bincode::deserialize(&buf)?;
-        // load values
-        reader.seek(SeekFrom::Start(0u64))?;
-
-        // name
-        let name = path
-            .as_ref()
-            .iter()
-            .last()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-
-        Ok(NaiveSSTable::new(path.as_ref().to_path_buf(), index, name))
-    }
-
-    pub fn first_key(&self) -> &str {
-        debug_assert!(!self.index.is_empty());
-        self.index.keys().next().unwrap()
-    }
-    pub fn last_key(&self) -> &str {
-        self.index.keys().last().unwrap()
-    }
-
-    fn get_index_entry(&self, k: &str) -> Option<(usize, usize, OpType)> {
-        self.index.get(k).map(|e| *e)
-    }
-
-    fn get_buf(&mut self) -> GhalaDbResult<BufReader<File>> {
-        Ok(BufReader::new(
-            OpenOptions::new().read(true).open(&self.path)?,
+        Ok(SSTable::new(
+            path.as_ref().to_path_buf(),
+            meta.index,
+            meta.seq_num,
+            reader,
         ))
     }
 
-    fn read_val(&mut self, offset: usize, len: usize) -> GhalaDbResult<Option<String>> {
-        let mut buf = self.get_buf()?;
-        buf.seek(SeekFrom::Start(offset as u64))?;
-        let mut vbuf = vec![0u8; len];
-        buf.read_exact(&mut vbuf)?;
-        Ok(Some(String::from_utf8(vbuf)?))
+    pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<ValueEntry>> {
+        if self.key_is_covered(key) {
+            match self.index.get(key) {
+                Some(IndexVal {
+                    offset,
+                    len,
+                    entry_type,
+                }) => match entry_type {
+                    EntryType::Tombstone => Ok(Some(ValueEntry::Tombstone)),
+                    EntryType::Value => Ok(self.read_val(*offset, *len)?.map(ValueEntry::Val)),
+                },
+                None => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
     }
 
-    #[allow(unused)]
-    pub fn into_memtable(&mut self) -> GhalaDbResult<BTreeMemTable> {
-        let mut buf = self.get_buf()?;
+    pub fn mem_size(&self) -> usize {
+        self.mem_size
+    }
+
+    pub fn deactivate(&mut self) {
+        self.active = false;
+    }
+
+    fn key_is_covered(&self, k: KeyRef) -> bool {
+        k >= &self.first_key && k <= &self.last_key
+    }
+
+    fn get_rdr<P: AsRef<Path>>(path: P) -> GhalaDbResult<BufReader<File>> {
+        Ok(BufReader::new(OpenOptions::new().read(true).open(path)?))
+    }
+
+    fn load_meta<P: AsRef<Path>>(path: P) -> GhalaDbResult<SstMetadata> {
+        let mut rdr = Self::get_rdr(&path)?;
+        rdr.seek(SeekFrom::End(-FOOTER_SIZE))?;
+        let mut buf = vec![];
+        let _ = rdr.read_to_end(&mut buf)?;
+        let footer: [u8; 8] = buf.try_into().map_err(|e| {
+            let error = format!("Failed to read sst footer. Reason: {:?}", e);
+            GhalaDBError::SstLoadError(error)
+        })?;
+        let meta_sz = usize::from_le_bytes(footer) as i64;
+
+        let off_set = 0i64 - (meta_sz + FOOTER_SIZE);
+        rdr.seek(SeekFrom::End(off_set))?;
+        let mut buf = vec![0u8; meta_sz as usize];
+        rdr.read_exact(&mut buf)?;
+        let meta: SstMetadata = bincode::deserialize(&buf).map_err(|e| {
+            error!("failed to deser sst metadata. Reason: {:?}", e);
+            e
+        })?;
+
+        Ok(meta)
+    }
+
+    fn load_index(p: &Path) -> GhalaDbResult<SstIndex> {
+        Self::load_meta(p).map(|m| m.index)
+    }
+
+    fn read_val(&mut self, offset: u64, len: usize) -> GhalaDbResult<Option<Bytes>> {
+        let bytes = Self::read_val_inner(&mut self.rdr, offset, len)?;
+        Ok(Some(bytes))
+    }
+
+    fn read_val_inner(rdr: &mut BufReader<File>, offset: u64, len: usize) -> GhalaDbResult<Bytes> {
+        rdr.seek(SeekFrom::Start(offset))?;
+        let mut v = vec![0u8; len];
+        rdr.read_exact(&mut v)?;
+        Ok(v)
+    }
+
+    #[allow(dead_code)]
+    pub fn as_memtable(&self) -> GhalaDbResult<BTreeMemTable> {
+        let mut buf = Self::get_rdr(&self.path)?;
         let mut table = BTreeMemTable::new();
-        for (k, (_, v_len, op_type)) in self.index.iter() {
-            match op_type {
-                OpType::Put => {
-                    let mut b = vec![0u8; *v_len];
-                    buf.read_exact(&mut b)?;
-                    let val = String::from_utf8(b)?;
-                    table.insert(k.to_string(), val);
+        for (k, idx_val) in self.index.iter() {
+            match idx_val.entry_type {
+                EntryType::Value => {
+                    let mut val = vec![0u8; idx_val.len];
+                    buf.read_exact(&mut val)?;
+                    table.insert(k.clone(), val);
                 }
-                OpType::Delete => table.delete(k.to_string()),
+                EntryType::Tombstone => table.delete(k.clone()),
             }
         }
 
         Ok(table)
     }
 
-    fn get_file_handle_with_metadata<P: AsRef<Path>>(path: P) -> GhalaDbResult<(File, Metadata)> {
-        let f = OpenOptions::new().read(true).open(path)?;
-        let m = f.metadata()?;
-        Ok((f, m))
+    pub(crate) fn iter(&self) -> GhalaDbResult<SSTableIter> {
+        let index = Self::load_index(&self.path)?;
+        let buf = Self::get_rdr(&self.path)?;
+        SSTableIter::new(buf, index)
+    }
+
+    fn delete(&self) -> GhalaDbResult<()> {
+        debug_assert!(!self.active, "deleting active sst");
+        debug!(
+            "deleting sst at: {} active: {}",
+            self.path.display(),
+            self.active
+        );
+        std::fs::remove_file(&self.path)?;
+        Ok(())
     }
 }
 
-impl Debug for NaiveSSTable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NaiveSSTable")
-            .field("index", &self.index)
-            .field("name", &self.name)
-            .finish()
-    }
-}
-
-impl SSTable for NaiveSSTable {
-    fn len(&self) -> usize {
-        self.index.len()
-    }
-
-    fn size(self) -> usize {
-        todo!()
-    }
-
-    fn get(&mut self, key: &str) -> GhalaDbResult<Option<String>> {
-        match self.get_index_entry(key) {
-            Some((offset, len, op_type)) => match op_type {
-                OpType::Delete => Ok(None),
-                OpType::Put => self.read_val(offset, len),
-            },
-            None => Ok(None),
+impl Drop for SSTable {
+    fn drop(&mut self) {
+        if !self.active {
+            self.delete()
+                .map_err(|e| {
+                    error!("failed to delete sst. Reason: {:#?}", e);
+                    e
+                })
+                .ok();
         }
+    }
+}
+
+pub(crate) struct SSTableIter {
+    buf: BufReader<File>,
+    index: IntoIter<Bytes, IndexVal>,
+}
+impl SSTableIter {
+    pub(crate) fn new(buf: BufReader<File>, index: SstIndex) -> GhalaDbResult<SSTableIter> {
+        Ok(SSTableIter {
+            buf,
+            index: index.into_iter(),
+        })
+    }
+    fn read_val(&mut self, offset: u64, len: usize) -> GhalaDbResult<Bytes> {
+        SSTable::read_val_inner(&mut self.buf, offset, len)
+    }
+}
+impl Iterator for SSTableIter {
+    type Item = GhalaDbResult<(Bytes, ValueEntry)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((
+            k,
+            IndexVal {
+                offset,
+                len,
+                entry_type,
+            },
+        )) = self.index.next()
+        {
+            match entry_type {
+                EntryType::Tombstone => Some(Ok((k, ValueEntry::Tombstone))),
+                EntryType::Value => Some(
+                    self.read_val(offset, len)
+                        .map(|bytes| (k, ValueEntry::Val(bytes))),
+                ),
+            }
+        } else {
+            None
+        }
+    }
+}
+
+pub(crate) struct SSTableWriter {
+    path: PathBuf,
+    buf: BufWriter<File>,
+    offset: u64,
+    index: SstIndex,
+    seq_num: u64,
+}
+
+impl SSTableWriter {
+    pub fn new(path: &PathBuf, seq_num: u64) -> GhalaDbResult<SSTableWriter> {
+        Ok(SSTableWriter {
+            path: path.clone(),
+            buf: BufWriter::new(OpenOptions::new().write(true).create(true).open(path)?),
+            offset: 0u64,
+            index: SstIndex::new(),
+            seq_num,
+        })
+    }
+
+    pub fn write(&mut self, k: Bytes, v: ValueEntry) -> GhalaDbResult<()> {
+        match v {
+            ValueEntry::Tombstone => {
+                self.index
+                    .insert(k, IndexVal::new(0, 0, EntryType::Tombstone));
+            }
+            ValueEntry::Val(bytes) => {
+                self.buf.write_all(&bytes)?;
+                self.index
+                    .insert(k, IndexVal::new(self.offset, bytes.len(), EntryType::Value));
+                self.offset += bytes.len() as u64;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn into_sstable(mut self) -> GhalaDbResult<SSTable> {
+        // write metadata
+        let metadata = SstMetadata {
+            index: self.index,
+            seq_num: self.seq_num,
+        };
+        let meta = bincode::serialize(&metadata)?;
+        self.buf.write_all(&meta)?;
+        // write footer
+        let meta_sz = meta.len() as u64;
+        let footer = meta_sz.to_le_bytes();
+        self.buf.write_all(&footer)?;
+        self.buf.flush()?;
+
+        SSTable::from_path(self.path).map_err(|e| {
+            debug!("got error loading sst from path: {}", e);
+            e
+        })
     }
 }

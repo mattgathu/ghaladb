@@ -1,108 +1,200 @@
+use crate::error::GhalaDbResult;
 use serde::{Deserialize, Serialize};
 
-use std::collections::btree_map::Iter;
+use std::collections::btree_map::IntoIter;
 use std::collections::BTreeMap;
+use std::ops::Add;
 
-pub trait MemTable {
-    fn contains(&self, key: String) -> bool;
-    fn delete(&mut self, key: String);
-    fn get(&self, key: &str) -> Option<String>;
-    fn insert(&mut self, key: String, val: String);
+pub type Bytes = Vec<u8>;
+pub type KeyRef<'a> = &'a [u8];
+
+pub(crate) trait MemTable {
+    fn contains(&self, key: KeyRef) -> bool;
+    fn delete(&mut self, key: Bytes);
+    fn get(&self, key: KeyRef) -> Option<&ValueEntry>;
+    fn insert(&mut self, key: Bytes, val: Bytes);
     fn len(&self) -> usize;
-    fn size(&self) -> usize;
+    fn mem_size(&self) -> usize;
     fn iter(&self) -> MemTableIter;
-    fn is_empty(&self) -> bool {
-        self.size() == 0
-    }
+    fn into_iter(self) -> MemTableIter;
+    fn is_empty(&self) -> bool;
 }
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum OpType {
-    Put = 0,
-    Delete = 1,
+pub enum EntryType {
+    Value = 0,
+    Tombstone = 1,
 }
 
-#[derive(Debug, PartialEq)]
-pub struct BTreeMemTable {
-    pub map: BTreeMap<String, Option<String>>,
-    size: usize,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ValueEntry {
+    Tombstone,
+    Val(Bytes),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct BTreeMemTable {
+    pub map: BTreeMap<Bytes, ValueEntry>,
+    mem_size: usize,
 }
 
 impl BTreeMemTable {
     pub fn new() -> BTreeMemTable {
         BTreeMemTable {
             map: BTreeMap::new(),
-            size: 0usize,
+            mem_size: 0usize,
         }
     }
 
     fn mem_size(&self) -> usize {
-        self.size
+        self.mem_size
     }
 
-    fn iter(&self) -> Iter<String, Option<String>> {
-        self.map.iter()
+    fn into_iter(self) -> IntoIter<Bytes, ValueEntry> {
+        self.map.into_iter()
+    }
+
+    fn iter(&self) -> IntoIter<Bytes, ValueEntry> {
+        //TODO: avoid cloning
+        self.map.clone().into_iter()
+    }
+
+    fn update_memsize(&mut self) {
+        self.mem_size = self
+            .map
+            .iter()
+            .map(|(k, v)| {
+                k.len()
+                    + match v {
+                        ValueEntry::Val(bytes) => bytes.len(),
+                        ValueEntry::Tombstone => 0usize,
+                    }
+            })
+            .sum();
+    }
+}
+
+impl Default for BTreeMemTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Add for BTreeMemTable {
+    type Output = Self;
+    /// Merge two mem tables. Incase of key collisions the values in the newer (right) table
+    /// are considered as the latest.
+    fn add(mut self, rhs: Self) -> Self::Output {
+        self.map.extend(rhs.map);
+        self.update_memsize();
+        self
     }
 }
 
 impl MemTable for BTreeMemTable {
-    fn contains(&self, key: String) -> bool {
-        self.map.contains_key(&key)
+    fn contains(&self, key: KeyRef) -> bool {
+        self.map.contains_key(key)
     }
 
-    fn delete(&mut self, key: String) {
-        self.map.insert(key, None);
-    }
-
-    fn get(&self, key: &str) -> Option<String> {
-        if let Some(v) = self.map.get(key) {
-            v.as_deref().map(|s| s.to_string())
-        } else {
-            None
+    fn delete(&mut self, key: Bytes) {
+        if let Some(val) = self.map.insert(key, ValueEntry::Tombstone) {
+            match val {
+                ValueEntry::Val(bytes) => self.mem_size -= bytes.len(),
+                ValueEntry::Tombstone => {}
+            }
         }
     }
 
-    fn insert(&mut self, key: String, val: String) {
-        self.size += key.len() + val.len();
-        self.map.insert(key, Some(val));
+    fn get(&self, key: KeyRef) -> Option<&ValueEntry> {
+        self.map.get(key)
+    }
+
+    fn insert(&mut self, key: Bytes, val: Bytes) {
+        if let Some(prev_val) = self.get(&key) {
+            let prev_val_size = match prev_val {
+                ValueEntry::Tombstone => 0usize,
+                ValueEntry::Val(bytes) => bytes.len(),
+            };
+            self.mem_size += val.len();
+            self.mem_size -= prev_val_size;
+        } else {
+            self.mem_size += key.len() + val.len();
+        }
+
+        self.map.insert(key, ValueEntry::Val(val));
     }
 
     fn len(&self) -> usize {
         self.map.len()
     }
 
-    fn size(&self) -> usize {
+    fn mem_size(&self) -> usize {
         self.mem_size()
+    }
+
+    fn into_iter(self) -> MemTableIter {
+        MemTableIter {
+            iter: self.into_iter(),
+        }
     }
 
     fn iter(&self) -> MemTableIter {
         MemTableIter { iter: self.iter() }
     }
-}
 
-pub struct MemTableIter<'a> {
-    iter: Iter<'a, String, Option<String>>,
-}
-
-impl<'a> Iterator for MemTableIter<'a> {
-    type Item = (String, Option<String>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|(k, v)| (k.to_string(), v.as_ref().map(|s| s.to_string())))
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 
-/// Merge two mem tables. Incase of key collisions the values in the newer (right) table
-/// are considered the latest.
-#[allow(dead_code)]
-pub fn merge_mem_tables(mut old: BTreeMemTable, new: BTreeMemTable) -> BTreeMemTable {
-    old.map.extend(new.map);
-    old
+pub(crate) struct MemTableIter {
+    iter: IntoIter<Bytes, ValueEntry>,
 }
+
+impl Iterator for MemTableIter {
+    type Item = GhalaDbResult<(Bytes, ValueEntry)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(Ok)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    //use super::*;
+    use rand::{
+        distributions::{Alphanumeric, DistString},
+        thread_rng,
+    };
+
+    use super::*;
+
+    fn gen_strings(len: usize, num: usize) -> Vec<String> {
+        let mut rng = thread_rng();
+        let mut strings = vec![];
+        for _ in 0..num {
+            strings.push(Alphanumeric {}.sample_string(&mut rng, len))
+        }
+        strings
+    }
+
+    #[test]
+    fn test_mem_size() {
+        let mut mem_table = BTreeMemTable::new();
+
+        assert_eq!(mem_table.mem_size(), 0usize);
+
+        let entries = gen_strings(32, 500);
+        for entry in &entries {
+            mem_table.insert(entry.clone().into_bytes(), entry.clone().into_bytes());
+        }
+
+        assert_eq!(mem_table.mem_size(), 32 * 1000usize);
+
+        for entry in entries {
+            mem_table.delete(entry.into_bytes());
+        }
+
+        assert_eq!(mem_table.mem_size(), 32 * 500usize);
+    }
 }

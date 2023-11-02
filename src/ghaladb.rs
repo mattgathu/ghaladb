@@ -1,124 +1,104 @@
-use std::collections::{BTreeMap, VecDeque};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
 
 use crate::config::DatabaseOptions;
 use crate::error::{GhalaDBError, GhalaDbResult};
-use crate::memtable::{BTreeMemTable, MemTable, MemTableIter, OpType};
-use crate::ssm::{Ssm, SsmCmd, SsmResp};
-use crate::wal::{LogRecord, OnDiskWal, WriteAheadLog};
+use crate::memtable::{BTreeMemTable, Bytes, KeyRef, MemTable, ValueEntry};
+use crate::ssm::{merge_iter, StoreSysMan};
 
-struct SsmInbox {
-    out_going: SyncSender<SsmCmd>,
-    incoming: Receiver<SsmResp>,
-}
-pub struct GhalaDB {
-    log: Box<dyn WriteAheadLog>,
+pub struct GhalaDB<K, V>
+where
+    K: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
     mem: BTreeMemTable,
-    flushing_mem: Arc<BTreeMemTable>,
-    #[allow(unused)]
-    flush_buf: BTreeMap<String, String>,
     db_options: DatabaseOptions,
-    ssm_inbox: SsmInbox,
-    #[allow(unused)]
-    ssm_handler: JoinHandle<()>,
+    ssm: StoreSysMan,
+    _k: PhantomData<K>,
+    _v: PhantomData<V>,
 }
 
-impl GhalaDB {
+impl<K, V> GhalaDB<K, V>
+where
+    K: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
     pub fn new<P: AsRef<Path>>(
         path: P,
         options: Option<DatabaseOptions>,
-    ) -> GhalaDbResult<GhalaDB> {
+    ) -> GhalaDbResult<GhalaDB<K, V>> {
+        debug!("database init. path: {:?}", path.as_ref());
+        debug!("database init with options: {:#?}", options);
         let db_options = options.unwrap_or_else(|| DatabaseOptions::builder().build());
-        Self::init_db_dir(path.as_ref())?;
-        let (tx, ssm_rx) = sync_channel::<SsmCmd>(10);
-        let (ssm_tx, rx) = sync_channel::<SsmResp>(10);
-        let ssm_inbox = SsmInbox {
-            out_going: tx,
-            incoming: rx,
-        };
-        let mut ssm = Ssm::new(VecDeque::new(), &path, ssm_tx, ssm_rx);
-        let ssm_handler = thread::spawn(move || ssm.work_loop());
+        Self::init_dir(path.as_ref())?;
+
+        let ssm = StoreSysMan::new(&path, db_options.max_ssts)?;
         let db = GhalaDB {
-            log: Box::new(OnDiskWal::new(path.as_ref())?),
             mem: BTreeMemTable::new(),
-            flushing_mem: Arc::new(BTreeMemTable::new()),
-            flush_buf: BTreeMap::new(),
             db_options,
-            ssm_inbox,
-            ssm_handler,
+            ssm,
+            _k: PhantomData,
+            _v: PhantomData,
         };
         Ok(db)
     }
 
-    pub fn delete<K: Into<String>>(&mut self, k: K) -> GhalaDbResult<()> {
-        let k = k.into();
-        self.log.log(LogRecord::new(&k, "", OpType::Delete))?;
-        self.mem.delete(k);
+    pub fn delete(&mut self, k: K) -> GhalaDbResult<()> {
+        let key: Bytes = bincode::serialize(&k)?;
+        trace!("deleting: {:?}", key);
+        self.mem.delete(key);
         Ok(())
     }
 
-    pub fn get<K: Into<String>>(&mut self, k: K) -> GhalaDbResult<Option<String>> {
-        let key = k.into();
-        if let Some(val) = self.mem.get(&key) {
-            return Ok(Some(val));
+    pub fn get(&mut self, k: K) -> GhalaDbResult<Option<V>> {
+        let key: Bytes = bincode::serialize(&k)?;
+        if let Some(val_entry) = self.mem.get(&key) {
+            match val_entry {
+                ValueEntry::Tombstone => Ok(None),
+                ValueEntry::Val(bytes) => Ok(Some(bincode::deserialize(bytes)?)),
+            }
+        } else {
+            self.get_from_ssm(&key)
         }
-        if let Some(val) = self.flushing_mem.get(&key) {
-            return Ok(Some(val));
-        }
-
-        self.get_from_ssm(&key)
     }
 
-    pub fn put<K: Into<String>, V: Into<String>>(&mut self, k: K, v: V) -> GhalaDbResult<()> {
-        let k = k.into();
-        let v = v.into();
-        if self.mem_at_capacity(k.len() + v.len()) {
+    pub fn put(&mut self, k: K, v: V) -> GhalaDbResult<()> {
+        let key: Bytes = bincode::serialize(&k)?;
+        let val: Bytes = bincode::serialize(&v)?;
+        trace!("inserting: {:?}", key);
+        if self.mem_at_capacity(key.len() + val.len()) {
             self.flush_mem()?;
         }
-        // write to WAL
-        let tag = OpType::Put;
-        let log_record = LogRecord::new(&k, &v, tag);
-        self.log.log(log_record)?;
-        self.mem.insert(k, v);
+        self.mem.insert(key, val);
         Ok(())
     }
 
-    pub fn iter(&self) -> GhalaDBIter {
-        GhalaDBIter {
-            iter: self.mem.iter(),
+    pub fn iter(&self) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(K, V)>> + '_> {
+        let mem_iter = self.mem.iter();
+        let ssm_iter = self.ssm.iter()?;
+        let merged = merge_iter(mem_iter, ssm_iter);
+        let db_iter: GhalaDBIter<K, V> = GhalaDBIter {
+            iter: Box::new(merged),
+            _k: PhantomData,
+            _v: PhantomData,
+        };
+
+        Ok(db_iter.into_iter())
+    }
+
+    fn get_from_ssm(&mut self, k: KeyRef) -> GhalaDbResult<Option<V>> {
+        trace!("reading from ssm");
+        match self.ssm.get(k)? {
+            None => Ok(None),
+            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
         }
     }
 
-    fn get_from_ssm(&self, k: &str) -> GhalaDbResult<Option<String>> {
-        self.ssm_inbox
-            .out_going
-            .send(SsmCmd::Get(k.to_string()))
-            .unwrap();
-        loop {
-            //TODO: this recv should have a timeout
-            match self.ssm_inbox.incoming.recv().unwrap() {
-                SsmResp::GetResp { key, val } => {
-                    debug_assert_eq!(&key, k);
-                    return Ok(val);
-                }
-                SsmResp::GetError(e) => {
-                    return Err(e);
-                }
-                _ => {
-                    //FIXME: we do not care for now what to do in these case
-                    // we should probably park these messages somewhere or just handle them here.
-                    // very least log them
-                    continue;
-                }
-            }
-        }
-    }
-
-    fn init_db_dir(path: &Path) -> GhalaDbResult<()> {
-        match std::fs::create_dir(path) {
+    fn init_dir(path: &Path) -> GhalaDbResult<()> {
+        trace!("initializing db directory: {:?}", path);
+        match std::fs::create_dir_all(path) {
             Ok(_) => Ok(()),
             Err(e) => match e.kind() {
                 std::io::ErrorKind::AlreadyExists => {
@@ -138,71 +118,86 @@ impl GhalaDB {
         if self.mem.is_empty() {
             return false;
         }
-        dbg!((dbg!(self.mem.size()) + kv_size) > dbg!(self.db_options.max_mem_table_size))
+        self.mem.mem_size() + kv_size > self.db_options.max_mem_table_size
     }
 
     fn flush_mem(&mut self) -> GhalaDbResult<()> {
-        //FIXME what happens to existing flushing_mem
-        // check if we swap before swapping
-        //std::mem::swap(&mut self.mem, &mut self.flushing_mem);
+        if self.mem.is_empty() {
+            debug!("got empty memtable to flush. NOP");
+            return Ok(());
+        }
+        debug!("flushing mem table");
         let mut mem_table = BTreeMemTable::new();
         std::mem::swap(&mut self.mem, &mut mem_table);
-        self.flushing_mem = Arc::new(mem_table);
-        self.ssm_inbox
-            .out_going
-            .send(SsmCmd::FlushMemTable(self.flushing_mem.clone()))
-            .unwrap();
-        Ok(())
-    }
+        let path = self.ssm.flush_mem_table(mem_table)?;
+        debug!("flushed mem table to: {:?}", path);
 
-    fn shut_down_ssm(&self) -> GhalaDbResult<()> {
-        self.ssm_inbox
-            .out_going
-            .send(SsmCmd::Shutdown)
-            .map_err(|_| GhalaDBError::SsmCmdSendError(SsmCmd::Shutdown))?;
-        loop {
-            match self.ssm_inbox.incoming.recv() {
-                Err(_) => {
-                    break;
-                }
-                Ok(_) => {
-                    //TODO
-                }
-            }
-        }
         Ok(())
     }
 }
 
-impl Drop for GhalaDB {
+impl<K, V> Drop for GhalaDB<K, V>
+where
+    K: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
     // TODO
     // Things to do when closing database
     // - flush values in memory
     // - sync data to disk
     // - clear wal
     fn drop(&mut self) {
-        //TODO: is the minion live at this point or already dropped?
-        self.log.flush().ok();
-        self.shut_down_ssm().ok();
+        debug!("flushing mem before shutdown");
+        self.flush_mem().ok();
     }
 }
 
-pub struct GhalaDBIter<'a> {
-    iter: MemTableIter<'a>,
+pub struct GhalaDBIter<K, V>
+where
+    K: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
+    iter: Box<dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>>,
+    _k: PhantomData<K>,
+    _v: PhantomData<V>,
 }
 
-impl<'a> Iterator for GhalaDBIter<'a> {
-    type Item = (String, String);
+impl<K, V> Iterator for GhalaDBIter<K, V>
+where
+    K: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
+    type Item = GhalaDbResult<(K, V)>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        match self.nxt() {
+            Err(e) => Some(Err(e)),
+            Ok(None) => None,
+            Ok(Some(kv)) => Some(Ok(kv)),
+        }
+    }
+}
+
+impl<K, V> GhalaDBIter<K, V>
+where
+    K: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+{
+    fn nxt(&mut self) -> GhalaDbResult<Option<(K, V)>> {
         loop {
-            if let Some((k, v)) = self.iter.next() {
+            if let Some(kv) = self.iter.next() {
+                let (k, v) = kv?;
                 match v {
-                    None => continue,
-                    Some(val) => return Some((k.to_string(), val.to_string())),
+                    ValueEntry::Tombstone => continue,
+                    //ValueEntry::Val(val) => return Some((k, val)),
+                    ValueEntry::Val(val) => {
+                        let key: K = bincode::deserialize(&k)?;
+                        let val: V = bincode::deserialize(&val)?;
+                        return Ok(Some((key, val)));
+                    }
                 }
             } else {
-                return None;
+                return Ok(None);
             }
         }
     }
@@ -219,9 +214,28 @@ impl<'a> Iterator for GhalaDBIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use rand::{
+        distributions::{Alphanumeric, DistString},
+        prelude::ThreadRng,
+        random, thread_rng,
+    };
+    use tempdir::TempDir;
+
     use super::*;
+
+    fn gen_tmp_dir() -> GhalaDbResult<TempDir> {
+        let mut rng = thread_rng();
+        Ok(TempDir::new(&gen_string(&mut rng, 16))?)
+    }
+
+    fn gen_string(rng: &mut ThreadRng, len: usize) -> String {
+        Alphanumeric {}.sample_string(rng, len)
+    }
+
     fn dummy_vals() -> Vec<(String, String)> {
-        let vals = vec![
+        let vals = [
             "Mike Tyson",
             "Deontay Wilder",
             "Anthony Joshua",
@@ -235,50 +249,65 @@ mod tests {
 
     #[test]
     fn key_lookup() -> GhalaDbResult<()> {
-        let mut db = GhalaDB::new("/tmp/foo", None)?;
-        let k = "hello";
-        let v = "world";
-        db.put(k, v)?;
-        assert_eq!(db.get(k)?, Some(v.to_string()));
+        env_logger::try_init().ok();
+        let tmp_dir = gen_tmp_dir()?;
+        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
+        let k = "hello".to_string();
+        let v = "world".to_string();
+        db.put(k.clone(), v.clone())?;
+        assert_eq!(db.get(k)?, Some(v));
         Ok(())
     }
 
     #[test]
     fn put_delete_get() -> GhalaDbResult<()> {
-        let mut db = GhalaDB::new("/tmp/foo", None)?;
-        let k = "hello";
-        let v = "world";
-        db.put(k, v)?;
-        assert_eq!(db.get(k)?, Some(v.to_string()));
-        db.delete(k)?;
+        env_logger::try_init().ok();
+        let tmp_dir = gen_tmp_dir()?;
+        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
+        let k = "hello".to_string();
+        let v = "world".to_string();
+        db.put(k.clone(), v.clone())?;
+        assert_eq!(db.get(k.clone())?, Some(v));
+        db.delete(k.clone())?;
         assert_eq!(db.get(k)?, None);
         Ok(())
     }
 
     #[test]
     fn flush_restore() -> GhalaDbResult<()> {
-        let mut db = GhalaDB::new("/tmp/foo", None)?;
-        db.put("hello", "world")?;
-        //db.flush(1)?;
+        env_logger::try_init().ok();
+        let tmp_dir = gen_tmp_dir()?;
+        info!("DB init");
+        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
+        db.put("hello".to_string(), "world".to_string())?;
+        info!("dropping DB");
+        drop(db);
+        info!("Reloading DB");
+        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
+        assert_eq!(db.get("hello".to_string())?, Some("world".to_string()));
         Ok(())
     }
 
     #[test]
     fn kv_iter() -> GhalaDbResult<()> {
-        let mut db = GhalaDB::new("/tmp/iter", None)?;
-        db.put("king", "queen")?;
-        db.put("man", "woman")?;
-        db.delete("king")?;
-        let entries: Vec<(String, String)> = db.iter().collect();
+        let tmp_dir = gen_tmp_dir()?;
+        let mut db = GhalaDB::new(tmp_dir.path(), None)?;
+        db.put("king".to_owned(), "queen".to_owned())?;
+        db.put("man".to_owned(), "woman".to_owned())?;
+        db.delete("king".to_owned())?;
+        let entries: Vec<(String, String)> = db
+            .iter()?
+            .collect::<GhalaDbResult<Vec<(String, String)>>>()?;
         assert!(!entries.contains(&("king".to_string(), "queen".to_string())));
         assert!(entries.contains(&("man".to_string(), "woman".to_string())));
 
-        let mut db = GhalaDB::new("/tmp/iter2", None)?;
+        let tmp_dir = gen_tmp_dir()?;
+        let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         for (k, v) in [("bee", "honey"), ("fish", "water")] {
-            db.put(k, v)?;
+            db.put(k.to_owned(), v.to_owned())?;
         }
         let mut counter = 0;
-        for _ in db.iter() {
+        for _ in db.iter()? {
             counter += 1;
         }
         assert_eq!(counter, 2);
@@ -287,24 +316,99 @@ mod tests {
 
     #[test]
     fn get_from_ssm() -> GhalaDbResult<()> {
-        let mut db = GhalaDB::new("/tmp/ssm", None)?;
-        db.put("left", "right")?;
-        db.put("man", "woman")?;
+        env_logger::try_init().ok();
+        let tmp_dir = gen_tmp_dir()?;
+        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
+        db.put("left".to_string(), "right".to_string())?;
+        db.put("man".to_string(), "woman".to_string())?;
         db.flush_mem()?;
-        assert_eq!(db.get("man")?, Some("woman".to_string()));
+        assert_eq!(db.get("man".to_string())?, Some("woman".to_string()));
         Ok(())
     }
 
     #[test]
     fn sst_merges() -> GhalaDbResult<()> {
+        env_logger::try_init().ok();
+        let tmp_dir = gen_tmp_dir()?;
         let opts = DatabaseOptions::builder()
             .max_mem_table_size(16)
             .sync(false)
             .build();
-        let mut db = GhalaDB::new("/tmp/ssm_merges", Some(opts))?;
+        let mut db = GhalaDB::new(tmp_dir.path(), Some(opts))?;
         for (k, v) in dummy_vals() {
             db.put(k, v)?;
         }
+        db.flush_mem()?;
+
+        for (k, v) in dummy_vals() {
+            db.delete(k)?;
+            db.delete(v)?;
+        }
+        db.flush_mem()?;
+        Ok(())
+    }
+
+    #[test]
+    fn data_integrity_1() -> GhalaDbResult<()> {
+        env_logger::try_init().ok();
+        let tmp_dir = gen_tmp_dir()?;
+        let opts = DatabaseOptions::builder()
+            .max_mem_table_size(1024)
+            .sync(false)
+            .build();
+        let mut rng = thread_rng();
+        let unchanged: HashSet<String> = (0..1000).map(|_| gen_string(&mut rng, 64)).collect();
+        let deleted: HashSet<String> = (0..1000).map(|_| gen_string(&mut rng, 64)).collect();
+        let updated: HashSet<String> = (0..1000).map(|_| gen_string(&mut rng, 64)).collect();
+        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), Some(opts.clone()))?;
+        assert!(unchanged.is_disjoint(&deleted));
+        assert!(unchanged.is_disjoint(&updated));
+        assert!(deleted.is_disjoint(&updated));
+
+        for k in unchanged.iter().chain(deleted.iter()).chain(updated.iter()) {
+            db.put(k.into(), k.into())?;
+        }
+
+        for k in &unchanged {
+            assert_eq!(db.get(k.into())?, Some(k.to_string()))
+        }
+        for k in &deleted {
+            db.delete(k.into())?;
+        }
+        for k in &updated {
+            db.put(k.into(), gen_string(&mut rng, random::<u8>() as usize))?;
+        }
+        for k in &unchanged {
+            assert_eq!(db.get(k.into())?, Some(k.to_string()))
+        }
+        for k in &deleted {
+            assert_eq!(db.get(k.into())?, None, "testing that key: {:?} is del", k)
+        }
+        for k in &updated {
+            assert_ne!(
+                db.get(k.into())?,
+                Some(k.to_string()),
+                "key: {:?} should have been updated.",
+                k
+            )
+        }
+        std::mem::drop(db);
+        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), Some(opts))?;
+        for k in &unchanged {
+            assert_eq!(db.get(k.into())?, Some(k.to_string()))
+        }
+        for k in &deleted {
+            assert_eq!(db.get(k.into())?, None, "testing that key: {:?} is del", k)
+        }
+        for k in &updated {
+            assert_ne!(
+                db.get(k.into())?,
+                Some(k.to_string()),
+                "key: {:?} should have been updated.",
+                k
+            )
+        }
+
         Ok(())
     }
 }

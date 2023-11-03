@@ -1,37 +1,8 @@
-use crate::error::GhalaDbResult;
-use serde::{Deserialize, Serialize};
+use crate::core::{Bytes, KeyRef, MemTable, MemTableIter, ValueEntry};
 
 use std::collections::btree_map::IntoIter;
 use std::collections::BTreeMap;
 use std::ops::Add;
-
-pub type Bytes = Vec<u8>;
-pub type KeyRef<'a> = &'a [u8];
-
-pub(crate) trait MemTable {
-    fn contains(&self, key: KeyRef) -> bool;
-    fn delete(&mut self, key: Bytes);
-    fn get(&self, key: KeyRef) -> Option<&ValueEntry>;
-    fn insert(&mut self, key: Bytes, val: Bytes);
-    fn len(&self) -> usize;
-    fn mem_size(&self) -> usize;
-    fn iter(&self) -> MemTableIter;
-    fn into_iter(self) -> MemTableIter;
-    fn is_empty(&self) -> bool;
-}
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum EntryType {
-    Value = 0,
-    Tombstone = 1,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ValueEntry {
-    Tombstone,
-    Val(Bytes),
-}
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct BTreeMemTable {
@@ -145,18 +116,6 @@ impl MemTable for BTreeMemTable {
 
     fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-}
-
-pub(crate) struct MemTableIter {
-    iter: IntoIter<Bytes, ValueEntry>,
-}
-
-impl Iterator for MemTableIter {
-    type Item = GhalaDbResult<(Bytes, ValueEntry)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(Ok)
     }
 }
 

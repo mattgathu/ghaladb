@@ -1,12 +1,10 @@
 //! Storage System Manager
 
 use crate::{
+    core::{Bytes, KeyRef, MemTable, ValueEntry},
     error::{GhalaDBError, GhalaDbResult},
-    memtable::{Bytes, KeyRef, MemTable, ValueEntry},
     sstable::{SSTable, SSTableIter, SSTableWriter},
 };
-use tap::tap::Tap;
-//use rand::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs::OpenOptions,
@@ -17,6 +15,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tap::tap::Tap;
 
 type LevelsOnDisk = BTreeMap<usize, Vec<PathBuf>>;
 type Levels = BTreeMap<usize, VecDeque<SSTable>>;

@@ -1,34 +1,22 @@
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use std::marker::PhantomData;
 use std::path::Path;
 
 use crate::config::DatabaseOptions;
+use crate::core::{Bytes, KeyRef, MemTable, ValueEntry};
 use crate::error::{GhalaDBError, GhalaDbResult};
-use crate::memtable::{BTreeMemTable, Bytes, KeyRef, MemTable, ValueEntry};
+use crate::memtable::BTreeMemTable;
 use crate::ssm::{merge_iter, StoreSysMan};
 
-pub struct GhalaDB<K, V>
-where
-    K: Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
-{
+pub struct GhalaDB {
     mem: BTreeMemTable,
     db_options: DatabaseOptions,
     ssm: StoreSysMan,
-    _k: PhantomData<K>,
-    _v: PhantomData<V>,
 }
 
-impl<K, V> GhalaDB<K, V>
-where
-    K: Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
-{
+impl GhalaDB {
     pub fn new<P: AsRef<Path>>(
         path: P,
         options: Option<DatabaseOptions>,
-    ) -> GhalaDbResult<GhalaDB<K, V>> {
+    ) -> GhalaDbResult<GhalaDB> {
         debug!("database init. path: {:?}", path.as_ref());
         debug!("database init with options: {:#?}", options);
         let db_options = options.unwrap_or_else(|| DatabaseOptions::builder().build());
@@ -39,34 +27,28 @@ where
             mem: BTreeMemTable::new(),
             db_options,
             ssm,
-            _k: PhantomData,
-            _v: PhantomData,
         };
         Ok(db)
     }
 
-    pub fn delete(&mut self, k: K) -> GhalaDbResult<()> {
-        let key: Bytes = bincode::serialize(&k)?;
+    pub fn delete(&mut self, key: Bytes) -> GhalaDbResult<()> {
         trace!("deleting: {:?}", key);
         self.mem.delete(key);
         Ok(())
     }
 
-    pub fn get(&mut self, k: K) -> GhalaDbResult<Option<V>> {
-        let key: Bytes = bincode::serialize(&k)?;
-        if let Some(val_entry) = self.mem.get(&key) {
+    pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<Bytes>> {
+        if let Some(val_entry) = self.mem.get(key) {
             match val_entry {
                 ValueEntry::Tombstone => Ok(None),
-                ValueEntry::Val(bytes) => Ok(Some(bincode::deserialize(bytes)?)),
+                ValueEntry::Val(bytes) => Ok(Some(bytes.to_vec())),
             }
         } else {
-            self.get_from_ssm(&key)
+            self.get_from_ssm(key)
         }
     }
 
-    pub fn put(&mut self, k: K, v: V) -> GhalaDbResult<()> {
-        let key: Bytes = bincode::serialize(&k)?;
-        let val: Bytes = bincode::serialize(&v)?;
+    pub fn put(&mut self, key: Bytes, val: Bytes) -> GhalaDbResult<()> {
         trace!("inserting: {:?}", key);
         if self.mem_at_capacity(key.len() + val.len()) {
             self.flush_mem()?;
@@ -75,24 +57,22 @@ where
         Ok(())
     }
 
-    pub fn iter(&self) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(K, V)>> + '_> {
+    pub fn iter(&self) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, Bytes)>> + '_> {
         let mem_iter = self.mem.iter();
         let ssm_iter = self.ssm.iter()?;
         let merged = merge_iter(mem_iter, ssm_iter);
-        let db_iter: GhalaDBIter<K, V> = GhalaDBIter {
+        let db_iter: GhalaDBIter = GhalaDBIter {
             iter: Box::new(merged),
-            _k: PhantomData,
-            _v: PhantomData,
         };
 
         Ok(db_iter.into_iter())
     }
 
-    fn get_from_ssm(&mut self, k: KeyRef) -> GhalaDbResult<Option<V>> {
+    fn get_from_ssm(&mut self, k: KeyRef) -> GhalaDbResult<Option<Bytes>> {
         trace!("reading from ssm");
         match self.ssm.get(k)? {
             None => Ok(None),
-            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+            Some(bytes) => Ok(Some(bytes)),
         }
     }
 
@@ -136,11 +116,7 @@ where
     }
 }
 
-impl<K, V> Drop for GhalaDB<K, V>
-where
-    K: Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
-{
+impl Drop for GhalaDB {
     // TODO
     // Things to do when closing database
     // - flush values in memory
@@ -152,22 +128,12 @@ where
     }
 }
 
-pub struct GhalaDBIter<K, V>
-where
-    K: Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
-{
+pub struct GhalaDBIter {
     iter: Box<dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>>,
-    _k: PhantomData<K>,
-    _v: PhantomData<V>,
 }
 
-impl<K, V> Iterator for GhalaDBIter<K, V>
-where
-    K: Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
-{
-    type Item = GhalaDbResult<(K, V)>;
+impl Iterator for GhalaDBIter {
+    type Item = GhalaDbResult<(Bytes, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.nxt() {
@@ -178,21 +144,14 @@ where
     }
 }
 
-impl<K, V> GhalaDBIter<K, V>
-where
-    K: Serialize + DeserializeOwned,
-    V: Serialize + DeserializeOwned,
-{
-    fn nxt(&mut self) -> GhalaDbResult<Option<(K, V)>> {
+impl GhalaDBIter {
+    fn nxt(&mut self) -> GhalaDbResult<Option<(Bytes, Bytes)>> {
         loop {
             if let Some(kv) = self.iter.next() {
-                let (k, v) = kv?;
+                let (key, v) = kv?;
                 match v {
                     ValueEntry::Tombstone => continue,
-                    //ValueEntry::Val(val) => return Some((k, val)),
                     ValueEntry::Val(val) => {
-                        let key: K = bincode::deserialize(&k)?;
-                        let val: V = bincode::deserialize(&val)?;
                         return Ok(Some((key, val)));
                     }
                 }
@@ -230,11 +189,13 @@ mod tests {
         Ok(TempDir::new(&gen_string(&mut rng, 16))?)
     }
 
+    fn gen_bytes(rng: &mut ThreadRng, len: usize) -> Bytes {
+        Alphanumeric {}.sample_string(rng, len).into_bytes()
+    }
     fn gen_string(rng: &mut ThreadRng, len: usize) -> String {
         Alphanumeric {}.sample_string(rng, len)
     }
-
-    fn dummy_vals() -> Vec<(String, String)> {
+    fn dummy_vals() -> Vec<(Bytes, Bytes)> {
         let vals = [
             "Mike Tyson",
             "Deontay Wilder",
@@ -243,7 +204,7 @@ mod tests {
             "Vladimir Klitschko",
         ];
         vals.iter()
-            .map(|b| (b.to_string(), b.to_string()))
+            .map(|b| (b.as_bytes().to_vec(), b.as_bytes().to_vec()))
             .collect()
     }
 
@@ -251,11 +212,11 @@ mod tests {
     fn key_lookup() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = gen_tmp_dir()?;
-        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
-        let k = "hello".to_string();
-        let v = "world".to_string();
+        let mut db = GhalaDB::new(tmp_dir.path(), None)?;
+        let k = "hello".as_bytes().to_vec();
+        let v = "world".as_bytes().to_vec();
         db.put(k.clone(), v.clone())?;
-        assert_eq!(db.get(k)?, Some(v));
+        assert_eq!(db.get(&k)?, Some(v));
         Ok(())
     }
 
@@ -263,13 +224,13 @@ mod tests {
     fn put_delete_get() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = gen_tmp_dir()?;
-        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
-        let k = "hello".to_string();
-        let v = "world".to_string();
+        let mut db = GhalaDB::new(tmp_dir.path(), None)?;
+        let k = "hello".as_bytes().to_vec();
+        let v = "world".as_bytes().to_vec();
         db.put(k.clone(), v.clone())?;
-        assert_eq!(db.get(k.clone())?, Some(v));
+        assert_eq!(db.get(&k)?, Some(v));
         db.delete(k.clone())?;
-        assert_eq!(db.get(k)?, None);
+        assert_eq!(db.get(&k)?, None);
         Ok(())
     }
 
@@ -278,13 +239,16 @@ mod tests {
         env_logger::try_init().ok();
         let tmp_dir = gen_tmp_dir()?;
         info!("DB init");
-        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
-        db.put("hello".to_string(), "world".to_string())?;
+        let mut db = GhalaDB::new(tmp_dir.path(), None)?;
+        db.put("hello".as_bytes().to_vec(), "world".as_bytes().to_vec())?;
         info!("dropping DB");
         drop(db);
         info!("Reloading DB");
-        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
-        assert_eq!(db.get("hello".to_string())?, Some("world".to_string()));
+        let mut db = GhalaDB::new(tmp_dir.path(), None)?;
+        assert_eq!(
+            db.get("hello".as_bytes())?,
+            Some("world".as_bytes().to_vec())
+        );
         Ok(())
     }
 
@@ -292,19 +256,18 @@ mod tests {
     fn kv_iter() -> GhalaDbResult<()> {
         let tmp_dir = gen_tmp_dir()?;
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
-        db.put("king".to_owned(), "queen".to_owned())?;
-        db.put("man".to_owned(), "woman".to_owned())?;
-        db.delete("king".to_owned())?;
-        let entries: Vec<(String, String)> = db
-            .iter()?
-            .collect::<GhalaDbResult<Vec<(String, String)>>>()?;
-        assert!(!entries.contains(&("king".to_string(), "queen".to_string())));
-        assert!(entries.contains(&("man".to_string(), "woman".to_string())));
+        db.put("king".as_bytes().to_vec(), "queen".as_bytes().to_vec())?;
+        db.put("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())?;
+        db.delete("king".as_bytes().to_vec())?;
+        let entries: Vec<(Bytes, Bytes)> =
+            db.iter()?.collect::<GhalaDbResult<Vec<(Bytes, Bytes)>>>()?;
+        assert!(!entries.contains(&("king".as_bytes().to_vec(), "queen".as_bytes().to_vec())));
+        assert!(entries.contains(&("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())));
 
         let tmp_dir = gen_tmp_dir()?;
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         for (k, v) in [("bee", "honey"), ("fish", "water")] {
-            db.put(k.to_owned(), v.to_owned())?;
+            db.put(k.as_bytes().to_vec(), v.as_bytes().to_vec())?;
         }
         let mut counter = 0;
         for _ in db.iter()? {
@@ -318,11 +281,11 @@ mod tests {
     fn get_from_ssm() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = gen_tmp_dir()?;
-        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), None)?;
-        db.put("left".to_string(), "right".to_string())?;
-        db.put("man".to_string(), "woman".to_string())?;
+        let mut db = GhalaDB::new(tmp_dir.path(), None)?;
+        db.put("left".as_bytes().to_vec(), "right".as_bytes().to_vec())?;
+        db.put("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())?;
         db.flush_mem()?;
-        assert_eq!(db.get("man".to_string())?, Some("woman".to_string()));
+        assert_eq!(db.get("man".as_bytes())?, Some("woman".as_bytes().to_vec()));
         Ok(())
     }
 
@@ -357,53 +320,53 @@ mod tests {
             .sync(false)
             .build();
         let mut rng = thread_rng();
-        let unchanged: HashSet<String> = (0..1000).map(|_| gen_string(&mut rng, 64)).collect();
-        let deleted: HashSet<String> = (0..1000).map(|_| gen_string(&mut rng, 64)).collect();
-        let updated: HashSet<String> = (0..1000).map(|_| gen_string(&mut rng, 64)).collect();
-        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), Some(opts.clone()))?;
+        let unchanged: HashSet<Bytes> = (0..1000).map(|_| gen_bytes(&mut rng, 64)).collect();
+        let deleted: HashSet<Bytes> = (0..1000).map(|_| gen_bytes(&mut rng, 64)).collect();
+        let updated: HashSet<Bytes> = (0..1000).map(|_| gen_bytes(&mut rng, 64)).collect();
+        let mut db = GhalaDB::new(tmp_dir.path(), Some(opts.clone()))?;
         assert!(unchanged.is_disjoint(&deleted));
         assert!(unchanged.is_disjoint(&updated));
         assert!(deleted.is_disjoint(&updated));
 
         for k in unchanged.iter().chain(deleted.iter()).chain(updated.iter()) {
-            db.put(k.into(), k.into())?;
+            db.put(k.clone(), k.clone())?;
         }
 
         for k in &unchanged {
-            assert_eq!(db.get(k.into())?, Some(k.to_string()))
+            assert_eq!(db.get(k)?, Some(k.clone()))
         }
         for k in &deleted {
-            db.delete(k.into())?;
+            db.delete(k.clone())?;
         }
         for k in &updated {
-            db.put(k.into(), gen_string(&mut rng, random::<u8>() as usize))?;
+            db.put(k.clone(), gen_bytes(&mut rng, random::<u8>() as usize))?;
         }
         for k in &unchanged {
-            assert_eq!(db.get(k.into())?, Some(k.to_string()))
+            assert_eq!(db.get(k)?, Some(k.clone()))
         }
         for k in &deleted {
-            assert_eq!(db.get(k.into())?, None, "testing that key: {:?} is del", k)
+            assert_eq!(db.get(k)?, None, "testing that key: {:?} is del", k)
         }
         for k in &updated {
             assert_ne!(
-                db.get(k.into())?,
-                Some(k.to_string()),
+                db.get(k)?,
+                Some(k.clone()),
                 "key: {:?} should have been updated.",
                 k
             )
         }
         std::mem::drop(db);
-        let mut db: GhalaDB<String, String> = GhalaDB::new(tmp_dir.path(), Some(opts))?;
+        let mut db = GhalaDB::new(tmp_dir.path(), Some(opts))?;
         for k in &unchanged {
-            assert_eq!(db.get(k.into())?, Some(k.to_string()))
+            assert_eq!(db.get(k)?, Some(k.clone()))
         }
         for k in &deleted {
-            assert_eq!(db.get(k.into())?, None, "testing that key: {:?} is del", k)
+            assert_eq!(db.get(k)?, None, "testing that key: {:?} is del", k)
         }
         for k in &updated {
             assert_ne!(
-                db.get(k.into())?,
-                Some(k.to_string()),
+                db.get(k)?,
+                Some(k.clone()),
                 "key: {:?} should have been updated.",
                 k
             )

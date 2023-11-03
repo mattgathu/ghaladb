@@ -11,26 +11,17 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::error::{GhalaDBError, GhalaDbResult};
-use crate::memtable::{BTreeMemTable, Bytes, EntryType, KeyRef, MemTable, ValueEntry};
+use crate::memtable::BTreeMemTable;
 
+use crate::core::{Bytes, KeyRef, MemTable, ValueEntry};
 const FOOTER_SIZE: i64 = 8;
 
-pub type SstIndex = BTreeMap<Bytes, IndexVal>;
+pub type SstIndex = BTreeMap<Bytes, DiskEntry>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct IndexVal {
-    offset: u64,
-    len: usize,
-    entry_type: EntryType,
-}
-impl IndexVal {
-    pub fn new(offset: u64, len: usize, entry_type: EntryType) -> IndexVal {
-        Self {
-            offset,
-            len,
-            entry_type,
-        }
-    }
+pub enum DiskEntry {
+    Tombstone,
+    Value { offset: u64, len: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +47,16 @@ impl SSTable {
         debug_assert!(!index.is_empty());
         let first_key = index.keys().next().unwrap().to_owned();
         let last_key = index.keys().last().unwrap().to_owned();
-        let mem_size: usize = index.iter().map(|(k, v)| k.len() + v.len).sum();
+        let mem_size: usize = index
+            .iter()
+            .map(|(k, v)| {
+                let vlen = match v {
+                    DiskEntry::Value { offset: _, len } => len,
+                    DiskEntry::Tombstone => &0,
+                };
+                k.len() + vlen
+            })
+            .sum();
         SSTable {
             path,
             index,
@@ -84,13 +84,11 @@ impl SSTable {
     pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<ValueEntry>> {
         if self.key_is_covered(key) {
             match self.index.get(key) {
-                Some(IndexVal {
-                    offset,
-                    len,
-                    entry_type,
-                }) => match entry_type {
-                    EntryType::Tombstone => Ok(Some(ValueEntry::Tombstone)),
-                    EntryType::Value => Ok(self.read_val(*offset, *len)?.map(ValueEntry::Val)),
+                Some(de) => match de {
+                    DiskEntry::Tombstone => Ok(Some(ValueEntry::Tombstone)),
+                    DiskEntry::Value { offset, len } => {
+                        Ok(self.read_val(*offset, *len)?.map(ValueEntry::Val))
+                    }
                 },
                 None => Ok(None),
             }
@@ -158,14 +156,14 @@ impl SSTable {
     pub fn as_memtable(&self) -> GhalaDbResult<BTreeMemTable> {
         let mut buf = Self::get_rdr(&self.path)?;
         let mut table = BTreeMemTable::new();
-        for (k, idx_val) in self.index.iter() {
-            match idx_val.entry_type {
-                EntryType::Value => {
-                    let mut val = vec![0u8; idx_val.len];
+        for (k, de) in self.index.iter() {
+            match de {
+                DiskEntry::Value { offset: _, len } => {
+                    let mut val = vec![0u8; *len];
                     buf.read_exact(&mut val)?;
                     table.insert(k.clone(), val);
                 }
-                EntryType::Tombstone => table.delete(k.clone()),
+                DiskEntry::Tombstone => table.delete(k.clone()),
             }
         }
 
@@ -205,7 +203,7 @@ impl Drop for SSTable {
 
 pub(crate) struct SSTableIter {
     buf: BufReader<File>,
-    index: IntoIter<Bytes, IndexVal>,
+    index: IntoIter<Bytes, DiskEntry>,
 }
 impl SSTableIter {
     pub(crate) fn new(buf: BufReader<File>, index: SstIndex) -> GhalaDbResult<SSTableIter> {
@@ -221,18 +219,10 @@ impl SSTableIter {
 impl Iterator for SSTableIter {
     type Item = GhalaDbResult<(Bytes, ValueEntry)>;
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((
-            k,
-            IndexVal {
-                offset,
-                len,
-                entry_type,
-            },
-        )) = self.index.next()
-        {
-            match entry_type {
-                EntryType::Tombstone => Some(Ok((k, ValueEntry::Tombstone))),
-                EntryType::Value => Some(
+        if let Some((k, de)) = self.index.next() {
+            match de {
+                DiskEntry::Tombstone => Some(Ok((k, ValueEntry::Tombstone))),
+                DiskEntry::Value { offset, len } => Some(
                     self.read_val(offset, len)
                         .map(|bytes| (k, ValueEntry::Val(bytes))),
                 ),
@@ -265,13 +255,17 @@ impl SSTableWriter {
     pub fn write(&mut self, k: Bytes, v: ValueEntry) -> GhalaDbResult<()> {
         match v {
             ValueEntry::Tombstone => {
-                self.index
-                    .insert(k, IndexVal::new(0, 0, EntryType::Tombstone));
+                self.index.insert(k, DiskEntry::Tombstone);
             }
             ValueEntry::Val(bytes) => {
                 self.buf.write_all(&bytes)?;
-                self.index
-                    .insert(k, IndexVal::new(self.offset, bytes.len(), EntryType::Value));
+                self.index.insert(
+                    k,
+                    DiskEntry::Value {
+                        offset: self.offset,
+                        len: bytes.len(),
+                    },
+                );
                 self.offset += bytes.len() as u64;
             }
         }

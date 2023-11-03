@@ -1,8 +1,9 @@
 use crate::core::{Bytes, KeyRef, MemTable, MemTableIter, ValueEntry};
 
-use std::collections::btree_map::IntoIter;
-use std::collections::BTreeMap;
-use std::ops::Add;
+use std::{
+    collections::{btree_map::IntoIter, BTreeMap},
+    ops::Add,
+};
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct BTreeMemTable {

@@ -1,17 +1,17 @@
-use patricia_tree::map::IntoIter;
-use patricia_tree::GenericPatriciaMap;
+use patricia_tree::{map::IntoIter, GenericPatriciaMap};
 use serde::{Deserialize, Serialize};
-use std::convert::TryInto;
-use std::fmt::Debug;
-use std::fs::{File, OpenOptions};
-use std::io::BufReader;
-use std::io::BufWriter;
-use std::io::Write;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::{
+    convert::TryInto,
+    fmt::Debug,
+    fs::{File, OpenOptions},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
-use crate::error::{GhalaDBError, GhalaDbResult};
-use crate::memtable::BTreeMemTable;
+use crate::{
+    error::{GhalaDBError, GhalaDbResult},
+    memtable::BTreeMemTable,
+};
 
 use crate::core::{Bytes, KeyRef, MemTable, ValueEntry};
 const FOOTER_SIZE: i64 = 8;

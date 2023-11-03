@@ -7,10 +7,6 @@ pub type GhalaDbResult<T> = Result<T, GhalaDBError>;
 #[derive(Error, Debug)]
 pub enum GhalaDBError {
     #[error(transparent)]
-    GlobIterationError(#[from] glob::GlobError),
-    #[error(transparent)]
-    GlobPatternError(#[from] glob::PatternError),
-    #[error(transparent)]
     IOError(#[from] std::io::Error),
     #[error(transparent)]
     BincodeError(#[from] bincode::Error),

@@ -106,12 +106,14 @@ impl MemTable for BTreeMemTable {
 
     fn into_iter(self) -> MemTableIter {
         MemTableIter {
-            iter: self.into_iter(),
+            iter: Box::new(self.into_iter()),
         }
     }
 
     fn iter(&self) -> MemTableIter {
-        MemTableIter { iter: self.iter() }
+        MemTableIter {
+            iter: Box::new(self.iter()),
+        }
     }
 
     fn is_empty(&self) -> bool {

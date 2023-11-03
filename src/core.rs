@@ -1,7 +1,5 @@
 use crate::error::GhalaDbResult;
 
-use std::collections::btree_map::IntoIter;
-
 pub type Bytes = Vec<u8>;
 pub type KeyRef<'a> = &'a [u8];
 
@@ -24,8 +22,7 @@ pub(crate) enum ValueEntry {
 }
 
 pub(crate) struct MemTableIter {
-    //TODO: IntoIter is not generic
-    pub iter: IntoIter<Bytes, ValueEntry>,
+    pub iter: Box<dyn Iterator<Item = (Bytes, ValueEntry)>>,
 }
 
 impl Iterator for MemTableIter {

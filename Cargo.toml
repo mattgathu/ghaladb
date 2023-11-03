@@ -16,9 +16,10 @@ rand = "0.8"
 glob = "0.3.1"
 tap = "1.0.1"
 serde_json = "1.0.107"
+patricia_tree = { version = "0.6.3", features = ["serde"] }
 
 [dev-dependencies]
-criterion = {version="0.3", features = ["html_reports"]}
+criterion = { version = "0.3", features = ["html_reports"] }
 rand = "0.8"
 env_logger = "0.10"
 tempdir = "0.3.7"

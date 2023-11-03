@@ -1,6 +1,6 @@
+use patricia_tree::map::IntoIter;
+use patricia_tree::GenericPatriciaMap;
 use serde::{Deserialize, Serialize};
-pub(crate) use std::collections::btree_map::IntoIter;
-use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
@@ -16,7 +16,7 @@ use crate::memtable::BTreeMemTable;
 use crate::core::{Bytes, KeyRef, MemTable, ValueEntry};
 const FOOTER_SIZE: i64 = 8;
 
-pub type SstIndex = BTreeMap<Bytes, DiskEntry>;
+pub type SstIndex = GenericPatriciaMap<Bytes, DiskEntry>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum DiskEntry {

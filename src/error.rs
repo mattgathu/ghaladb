@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::core::VlogNum;
+
 pub type GhalaDbResult<T> = Result<T, GhalaDBError>;
 
 #[derive(Error, Debug)]
@@ -26,4 +28,10 @@ pub enum GhalaDBError {
     CompactionError(String),
     #[error("Failed to load sst: {0}")]
     SstLoadError(String),
+    #[error("Missing Vlog: {0}")]
+    MissingVlog(VlogNum),
+    #[error("{0}")]
+    VlogReadError(String),
+    #[error("Missing value entry for key: {0:?}")]
+    MissingValueEntry(Vec<u8>),
 }

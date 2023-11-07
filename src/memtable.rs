@@ -1,10 +1,36 @@
-use crate::core::{Bytes, KeyRef, MemTable, MemTableIter, ValueEntry};
+use crate::{
+    core::{Bytes, DataPtr, KeyRef, ValueEntry},
+    error::GhalaDbResult,
+};
 
 use std::{
     collections::{btree_map::IntoIter, BTreeMap},
     ops::Add,
 };
+pub(crate) trait MemTable {
+    fn contains(&self, key: KeyRef) -> bool;
+    fn delete(&mut self, key: Bytes);
+    fn get(&self, key: KeyRef) -> Option<ValueEntry>;
+    fn insert(&mut self, key: Bytes, val: DataPtr);
+    fn len(&self) -> usize;
+    fn mem_size(&self) -> usize;
+    fn iter(&self) -> MemTableIter;
+    fn into_iter(self) -> MemTableIter;
+    fn is_empty(&self) -> bool;
+}
+pub(crate) struct MemTableIter {
+    pub iter: Box<dyn Iterator<Item = (Bytes, ValueEntry)>>,
+}
 
+impl Iterator for MemTableIter {
+    type Item = GhalaDbResult<(Bytes, ValueEntry)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(Ok)
+    }
+}
+//TODO make table generic over key and val
+// to make refactor easier
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct BTreeMemTable {
     pub map: BTreeMap<Bytes, ValueEntry>,
@@ -33,17 +59,7 @@ impl BTreeMemTable {
     }
 
     fn update_memsize(&mut self) {
-        self.mem_size = self
-            .map
-            .iter()
-            .map(|(k, v)| {
-                k.len()
-                    + match v {
-                        ValueEntry::Val(bytes) => bytes.len(),
-                        ValueEntry::Tombstone => 0usize,
-                    }
-            })
-            .sum();
+        self.mem_size = self.map.iter().map(|(k, v)| k.len() + v.mem_sz()).sum();
     }
 }
 
@@ -72,26 +88,26 @@ impl MemTable for BTreeMemTable {
     fn delete(&mut self, key: Bytes) {
         if let Some(val) = self.map.insert(key, ValueEntry::Tombstone) {
             match val {
-                ValueEntry::Val(bytes) => self.mem_size -= bytes.len(),
+                ValueEntry::Val(dp) => self.mem_size -= dp.mem_sz(),
                 ValueEntry::Tombstone => {}
             }
         }
     }
 
-    fn get(&self, key: KeyRef) -> Option<&ValueEntry> {
-        self.map.get(key)
+    fn get(&self, key: KeyRef) -> Option<ValueEntry> {
+        self.map.get(key).cloned()
     }
 
-    fn insert(&mut self, key: Bytes, val: Bytes) {
+    fn insert(&mut self, key: Bytes, val: DataPtr) {
         if let Some(prev_val) = self.get(&key) {
             let prev_val_size = match prev_val {
                 ValueEntry::Tombstone => 0usize,
-                ValueEntry::Val(bytes) => bytes.len(),
+                ValueEntry::Val(dp) => dp.mem_sz(),
             };
-            self.mem_size += val.len();
+            self.mem_size += val.mem_sz();
             self.mem_size -= prev_val_size;
         } else {
-            self.mem_size += key.len() + val.len();
+            self.mem_size += key.len() + val.mem_sz();
         }
 
         self.map.insert(key, ValueEntry::Val(val));
@@ -124,39 +140,5 @@ impl MemTable for BTreeMemTable {
 
 #[cfg(test)]
 mod tests {
-    use rand::{
-        distributions::{Alphanumeric, DistString},
-        thread_rng,
-    };
-
-    use super::*;
-
-    fn gen_strings(len: usize, num: usize) -> Vec<String> {
-        let mut rng = thread_rng();
-        let mut strings = vec![];
-        for _ in 0..num {
-            strings.push(Alphanumeric {}.sample_string(&mut rng, len))
-        }
-        strings
-    }
-
-    #[test]
-    fn test_mem_size() {
-        let mut mem_table = BTreeMemTable::new();
-
-        assert_eq!(mem_table.mem_size(), 0usize);
-
-        let entries = gen_strings(32, 500);
-        for entry in &entries {
-            mem_table.insert(entry.clone().into_bytes(), entry.clone().into_bytes());
-        }
-
-        assert_eq!(mem_table.mem_size(), 32 * 1000usize);
-
-        for entry in entries {
-            mem_table.delete(entry.into_bytes());
-        }
-
-        assert_eq!(mem_table.mem_size(), 32 * 500usize);
-    }
+    //TODO
 }

@@ -1,34 +1,71 @@
-use crate::error::GhalaDbResult;
+use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use rand::{distributions::Standard, thread_rng, Rng};
 
 pub type Bytes = Vec<u8>;
 pub type KeyRef<'a> = &'a [u8];
-
-pub(crate) trait MemTable {
-    fn contains(&self, key: KeyRef) -> bool;
-    fn delete(&mut self, key: Bytes);
-    fn get(&self, key: KeyRef) -> Option<&ValueEntry>;
-    fn insert(&mut self, key: Bytes, val: Bytes);
-    fn len(&self) -> usize;
-    fn mem_size(&self) -> usize;
-    fn iter(&self) -> MemTableIter;
-    fn into_iter(self) -> MemTableIter;
-    fn is_empty(&self) -> bool;
-}
+pub type VlogNum = u64;
+pub type DataEntrySz = u32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ValueEntry {
     Tombstone,
-    Val(Bytes),
+    Val(DataPtr),
+}
+impl ValueEntry {
+    pub fn mem_sz(&self) -> usize {
+        match &self {
+            ValueEntry::Tombstone => 0,
+            ValueEntry::Val(dp) => dp.mem_sz(),
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Hash)]
+pub struct DataPtr {
+    pub vlog: VlogNum,
+    pub offset: u64,
+    pub len: DataEntrySz,
+}
+impl DataPtr {
+    pub fn new(vlog: VlogNum, offset: u64, len: u32) -> Self {
+        Self { vlog, offset, len }
+    }
+    pub fn mem_sz(&self) -> usize {
+        std::mem::size_of_val(self)
+    }
+    pub fn serde_sz() -> usize {
+        // u64 + u64 + u32
+        20
+    }
 }
 
-pub(crate) struct MemTableIter {
-    pub iter: Box<dyn Iterator<Item = (Bytes, ValueEntry)>>,
+#[cfg(test)]
+pub trait FixtureGen<T> {
+    fn gen() -> T;
 }
 
-impl Iterator for MemTableIter {
-    type Item = GhalaDbResult<(Bytes, ValueEntry)>;
+#[cfg(test)]
+impl FixtureGen<Bytes> for Bytes {
+    fn gen() -> Bytes {
+        let mut rng = thread_rng();
+        let len = rng.gen_range(32..4097);
+        rng.sample_iter(Standard).take(len).collect()
+    }
+}
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(Ok)
+#[cfg(test)]
+mod tests {
+    use crate::error::GhalaDbResult;
+
+    use super::*;
+
+    #[test]
+    fn dp_serde_sz() -> GhalaDbResult<()> {
+        let dp = DataPtr::new(0, 0, 0);
+        let serde_sz = DataPtr::serde_sz();
+        let bytes = bincode::serialize(&dp)?;
+        assert_eq!(bytes.len(), serde_sz, "dp bytes not match expected len");
+        Ok(())
     }
 }

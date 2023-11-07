@@ -1,16 +1,29 @@
 use crate::{
     config::DatabaseOptions,
-    core::{Bytes, KeyRef, MemTable, ValueEntry},
+    core::{Bytes, KeyRef, ValueEntry},
     error::{GhalaDBError, GhalaDbResult},
-    memtable::BTreeMemTable,
-    ssm::{merge_iter, StoreSysMan},
+    gc::Janitor,
+    keyman::KeyMan,
+    utils::t,
+    vlog::{DataEntry, VlogsMan},
 };
 use std::path::Path;
 
+/// ///
+/// ///          _|                  _|                  _|  _|
+/// ///  _|_|_|  _|_|_|      _|_|_|  _|    _|_|_|    _|_|_|  _|_|_|
+/// ///_|    _|  _|    _|  _|    _|  _|  _|    _|  _|    _|  _|    _|
+/// ///_|    _|  _|    _|  _|    _|  _|  _|    _|  _|    _|  _|    _|
+/// ///  _|_|_|  _|    _|    _|_|_|  _|    _|_|_|    _|_|_|  _|_|_|
+/// ///      _|
+/// ///  _|_|
+/// ///
 pub struct GhalaDB {
-    mem: BTreeMemTable,
-    db_options: DatabaseOptions,
-    ssm: StoreSysMan,
+    keyman: KeyMan,
+    vlogs_man: VlogsMan,
+    janitor: Option<Janitor>,
+    opts: DatabaseOptions,
+    gc_on: bool,
 }
 
 impl GhalaDB {
@@ -20,61 +33,85 @@ impl GhalaDB {
     ) -> GhalaDbResult<GhalaDB> {
         debug!("database init. path: {:?}", path.as_ref());
         debug!("database init with options: {:#?}", options);
-        let db_options = options.unwrap_or_else(|| DatabaseOptions::builder().build());
+        let db_options =
+            options.unwrap_or_else(|| DatabaseOptions::builder().build());
         Self::init_dir(path.as_ref())?;
 
-        let ssm = StoreSysMan::new(&path, db_options.max_ssts)?;
+        let vlogs_man = VlogsMan::new(path.as_ref(), db_options.clone())?;
+        let keyman = KeyMan::new(path.as_ref(), db_options.clone())?;
+        let janitor = None;
         let db = GhalaDB {
-            mem: BTreeMemTable::new(),
-            db_options,
-            ssm,
+            keyman,
+            vlogs_man,
+            janitor,
+            opts: db_options,
+            gc_on: false,
         };
         Ok(db)
     }
 
     pub fn delete(&mut self, key: Bytes) -> GhalaDbResult<()> {
         trace!("deleting: {:?}", key);
-        self.mem.delete(key);
+        t!("keyman::del", self.keyman.delete(key))?;
         Ok(())
     }
 
     pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<Bytes>> {
-        if let Some(val_entry) = self.mem.get(key) {
-            match val_entry {
-                ValueEntry::Tombstone => Ok(None),
-                ValueEntry::Val(bytes) => Ok(Some(bytes.to_vec())),
-            }
+        if let Some(dp) = t!("keyman::get", self.keyman.get(key))? {
+            let bytes = t!("vlogman::get", self.vlogs_man.get(&dp))?.val;
+            Ok(Some(bytes))
         } else {
-            self.get_from_ssm(key)
+            Ok(None)
         }
     }
 
     pub fn put(&mut self, key: Bytes, val: Bytes) -> GhalaDbResult<()> {
-        trace!("inserting: {:?}", key);
-        if self.mem_at_capacity(key.len() + val.len()) {
-            self.flush_mem()?;
-        }
-        self.mem.insert(key, val);
+        trace!("updating: {key:?}");
+        let de = DataEntry::new(key.clone(), val);
+        let dp = t!("vlogman::put", self.vlogs_man.put(de))?;
+        t!("keyman::put", self.keyman.put(key, dp))?;
+        t!("gc", self.gc())?;
+
         Ok(())
     }
 
-    pub fn iter(&self) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, Bytes)>> + '_> {
-        let mem_iter = self.mem.iter();
-        let ssm_iter = self.ssm.iter()?;
-        let merged = merge_iter(mem_iter, ssm_iter);
+    pub fn iter(
+        self,
+    ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, Bytes)>>> {
         let db_iter: GhalaDBIter = GhalaDBIter {
-            iter: Box::new(merged),
+            iter: Box::new(self.keyman.iter()?),
+            valman: self.vlogs_man,
         };
 
         Ok(db_iter.into_iter())
     }
 
-    fn get_from_ssm(&mut self, k: KeyRef) -> GhalaDbResult<Option<Bytes>> {
-        trace!("reading from ssm");
-        match self.ssm.get(k)? {
-            None => Ok(None),
-            Some(bytes) => Ok(Some(bytes)),
+    /// Attempts to sync all data to disk.
+    pub fn sync(&mut self) -> GhalaDbResult<()> {
+        self.keyman.sync()?;
+        self.vlogs_man.sync()?;
+        Ok(())
+    }
+
+    fn gc(&mut self) -> GhalaDbResult<()> {
+        if !self.opts.vlog_compaction_enabled || self.gc_on {
+            return Ok(());
         }
+        self.gc_on = true;
+        if let Some(ref mut jan) = self.janitor {
+            if let Some(de) = jan.step(&mut self.keyman)? {
+                t!("gc::put", self.put(de.key, de.val))?;
+            } else {
+                t!("vlogs_man::drop_vlog", self.vlogs_man.drop_vlog(jan.vnum()))?;
+                self.janitor = None;
+            }
+        } else if let Some((vnum, path)) = self.vlogs_man.needs_gc()? {
+            let janitor = t!("janitor::new", Janitor::new(vnum, &path))?;
+            self.janitor = Some(janitor);
+        }
+        self.gc_on = false;
+
+        Ok(())
     }
 
     fn init_dir(path: &Path) -> GhalaDbResult<()> {
@@ -94,43 +131,11 @@ impl GhalaDB {
         }?;
         Ok(())
     }
-
-    fn mem_at_capacity(&self, kv_size: usize) -> bool {
-        if self.mem.is_empty() {
-            return false;
-        }
-        self.mem.mem_size() + kv_size > self.db_options.max_mem_table_size
-    }
-
-    fn flush_mem(&mut self) -> GhalaDbResult<()> {
-        if self.mem.is_empty() {
-            debug!("got empty memtable to flush. NOP");
-            return Ok(());
-        }
-        debug!("flushing mem table");
-        let mut mem_table = BTreeMemTable::new();
-        std::mem::swap(&mut self.mem, &mut mem_table);
-        let path = self.ssm.flush_mem_table(mem_table)?;
-        debug!("flushed mem table to: {:?}", path);
-
-        Ok(())
-    }
-}
-
-impl Drop for GhalaDB {
-    // TODO
-    // Things to do when closing database
-    // - flush values in memory
-    // - sync data to disk
-    // - clear wal
-    fn drop(&mut self) {
-        debug!("flushing mem before shutdown");
-        self.flush_mem().ok();
-    }
 }
 
 pub struct GhalaDBIter {
     iter: Box<dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>>,
+    valman: VlogsMan,
 }
 
 impl Iterator for GhalaDBIter {
@@ -149,11 +154,12 @@ impl GhalaDBIter {
     fn nxt(&mut self) -> GhalaDbResult<Option<(Bytes, Bytes)>> {
         loop {
             if let Some(kv) = self.iter.next() {
-                let (key, v) = kv?;
+                let (_, v) = kv?;
                 match v {
                     ValueEntry::Tombstone => continue,
-                    ValueEntry::Val(val) => {
-                        return Ok(Some((key, val)));
+                    ValueEntry::Val(dp) => {
+                        let v = self.valman.get(&dp)?;
+                        return Ok(Some((v.key, v.val)));
                     }
                 }
             } else {
@@ -176,26 +182,11 @@ impl GhalaDBIter {
 mod tests {
     use std::collections::HashSet;
 
-    use rand::{
-        distributions::{Alphanumeric, DistString},
-        prelude::ThreadRng,
-        random, thread_rng,
-    };
-    use tempdir::TempDir;
+    use crate::core::FixtureGen;
 
     use super::*;
+    use tempfile::tempdir;
 
-    fn gen_tmp_dir() -> GhalaDbResult<TempDir> {
-        let mut rng = thread_rng();
-        Ok(TempDir::new(&gen_string(&mut rng, 16))?)
-    }
-
-    fn gen_bytes(rng: &mut ThreadRng, len: usize) -> Bytes {
-        Alphanumeric {}.sample_string(rng, len).into_bytes()
-    }
-    fn gen_string(rng: &mut ThreadRng, len: usize) -> String {
-        Alphanumeric {}.sample_string(rng, len)
-    }
     fn dummy_vals() -> Vec<(Bytes, Bytes)> {
         let vals = [
             "Mike Tyson",
@@ -212,7 +203,7 @@ mod tests {
     #[test]
     fn key_lookup() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         let k = "hello".as_bytes().to_vec();
         let v = "world".as_bytes().to_vec();
@@ -224,7 +215,7 @@ mod tests {
     #[test]
     fn put_delete_get() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         let k = "hello".as_bytes().to_vec();
         let v = "world".as_bytes().to_vec();
@@ -238,7 +229,7 @@ mod tests {
     #[test]
     fn flush_restore() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         info!("DB init");
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         db.put("hello".as_bytes().to_vec(), "world".as_bytes().to_vec())?;
@@ -255,17 +246,19 @@ mod tests {
 
     #[test]
     fn kv_iter() -> GhalaDbResult<()> {
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         db.put("king".as_bytes().to_vec(), "queen".as_bytes().to_vec())?;
         db.put("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())?;
         db.delete("king".as_bytes().to_vec())?;
         let entries: Vec<(Bytes, Bytes)> =
             db.iter()?.collect::<GhalaDbResult<Vec<(Bytes, Bytes)>>>()?;
-        assert!(!entries.contains(&("king".as_bytes().to_vec(), "queen".as_bytes().to_vec())));
-        assert!(entries.contains(&("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())));
+        assert!(!entries
+            .contains(&("king".as_bytes().to_vec(), "queen".as_bytes().to_vec())));
+        assert!(entries
+            .contains(&("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())));
 
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         for (k, v) in [("bee", "honey"), ("fish", "water")] {
             db.put(k.as_bytes().to_vec(), v.as_bytes().to_vec())?;
@@ -281,11 +274,10 @@ mod tests {
     #[test]
     fn get_from_ssm() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         db.put("left".as_bytes().to_vec(), "right".as_bytes().to_vec())?;
         db.put("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())?;
-        db.flush_mem()?;
         assert_eq!(db.get("man".as_bytes())?, Some("woman".as_bytes().to_vec()));
         Ok(())
     }
@@ -293,7 +285,7 @@ mod tests {
     #[test]
     fn sst_merges() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         let opts = DatabaseOptions::builder()
             .max_mem_table_size(16)
             .sync(false)
@@ -302,28 +294,49 @@ mod tests {
         for (k, v) in dummy_vals() {
             db.put(k, v)?;
         }
-        db.flush_mem()?;
 
         for (k, v) in dummy_vals() {
             db.delete(k)?;
             db.delete(v)?;
         }
-        db.flush_mem()?;
+        Ok(())
+    }
+
+    #[test]
+    fn gc() -> GhalaDbResult<()> {
+        env_logger::try_init().ok();
+        let tmp_dir = tempdir()?;
+        let opts = DatabaseOptions::builder()
+            .max_mem_table_size(1024)
+            .max_vlog_size(4 * 1024)
+            .sync(false)
+            .build();
+        let mut db = GhalaDB::new(tmp_dir.path(), Some(opts.clone()))?;
+        let data = (0..100).map(|_| Bytes::gen()).collect::<Vec<_>>();
+        for entry in &data {
+            db.put(entry.clone(), entry.clone())?;
+        }
+        for entry in data {
+            let val = db.get(&entry)?.unwrap();
+            assert!(entry == val);
+        }
+
         Ok(())
     }
 
     #[test]
     fn data_integrity_1() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
-        let tmp_dir = gen_tmp_dir()?;
+        let tmp_dir = tempdir()?;
         let opts = DatabaseOptions::builder()
-            .max_mem_table_size(1024)
+            .max_mem_table_size(1000 * 1024)
+            .max_vlog_size(10000 * 1024)
+            .vlog_compaction_enabled(true)
             .sync(false)
             .build();
-        let mut rng = thread_rng();
-        let unchanged: HashSet<Bytes> = (0..1000).map(|_| gen_bytes(&mut rng, 64)).collect();
-        let deleted: HashSet<Bytes> = (0..1000).map(|_| gen_bytes(&mut rng, 64)).collect();
-        let updated: HashSet<Bytes> = (0..1000).map(|_| gen_bytes(&mut rng, 64)).collect();
+        let unchanged: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
+        let deleted: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
+        let updated: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
         let mut db = GhalaDB::new(tmp_dir.path(), Some(opts.clone()))?;
         assert!(unchanged.is_disjoint(&deleted));
         assert!(unchanged.is_disjoint(&updated));
@@ -340,7 +353,7 @@ mod tests {
             db.delete(k.clone())?;
         }
         for k in &updated {
-            db.put(k.clone(), gen_bytes(&mut rng, random::<u8>() as usize))?;
+            db.put(k.clone(), Bytes::gen())?;
         }
         for k in &unchanged {
             assert_eq!(db.get(k)?, Some(k.clone()))
@@ -356,7 +369,7 @@ mod tests {
                 k
             )
         }
-        std::mem::drop(db);
+        drop(db);
         let mut db = GhalaDB::new(tmp_dir.path(), Some(opts))?;
         for k in &unchanged {
             assert_eq!(db.get(k)?, Some(k.clone()))

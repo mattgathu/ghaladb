@@ -8,7 +8,9 @@ edition = "2018"
 
 [dependencies]
 bincode = "1"
+dashmap = "5.5.3"
 log = "0.4"
+memmap2 = {version = "0.9", optional = true}
 patricia_tree = { version = "0.6", features = ["serde"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -17,11 +19,15 @@ tap = "1"
 thiserror = "1"
 typed-builder = "0.9"
 
+[features]
+default = []
+mmap =["dep:memmap2"]
+
 [dev-dependencies]
 criterion = { version = "0.3", features = ["html_reports"] }
 rand = "0.8"
 env_logger = "0.10"
-tempdir = "0.3"
+tempfile = "*"
 
 [lib]
 bench = false

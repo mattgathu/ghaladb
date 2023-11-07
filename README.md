@@ -1,4 +1,9 @@
-
+TODO
+* test read-modify-write scenarios
+    * write data to db
+    * read data and write back modified version 
+* this will introduce lots of stale data
+* test how well db copes
 RoadMap 
 --
 * KV store features

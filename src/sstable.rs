@@ -9,11 +9,11 @@ use std::{
 };
 
 use crate::{
+    core::DataPtr,
     error::{GhalaDBError, GhalaDbResult},
-    memtable::BTreeMemTable,
 };
 
-use crate::core::{Bytes, KeyRef, MemTable, ValueEntry};
+use crate::core::{Bytes, KeyRef, ValueEntry};
 const FOOTER_SIZE: i64 = 8;
 
 pub type SstIndex = GenericPatriciaMap<Bytes, DiskEntry>;
@@ -43,7 +43,12 @@ pub(crate) struct SSTable {
 }
 
 impl SSTable {
-    pub fn new(path: PathBuf, index: SstIndex, seq_num: u64, rdr: BufReader<File>) -> SSTable {
+    pub fn new(
+        path: PathBuf,
+        index: SstIndex,
+        seq_num: u64,
+        rdr: BufReader<File>,
+    ) -> SSTable {
         debug_assert!(!index.is_empty());
         let first_key = index.keys().next().unwrap().to_owned();
         let last_key = index.keys().last().unwrap().to_owned();
@@ -136,38 +141,30 @@ impl SSTable {
         Ok(meta)
     }
 
+    #[inline]
     fn load_index(p: &Path) -> GhalaDbResult<SstIndex> {
         Self::load_meta(p).map(|m| m.index)
     }
 
-    fn read_val(&mut self, offset: u64, len: usize) -> GhalaDbResult<Option<Bytes>> {
+    fn read_val(
+        &mut self,
+        offset: u64,
+        len: usize,
+    ) -> GhalaDbResult<Option<DataPtr>> {
         let bytes = Self::read_val_inner(&mut self.rdr, offset, len)?;
-        Ok(Some(bytes))
+        let dp: DataPtr = bincode::deserialize(&bytes)?;
+        Ok(Some(dp))
     }
 
-    fn read_val_inner(rdr: &mut BufReader<File>, offset: u64, len: usize) -> GhalaDbResult<Bytes> {
+    fn read_val_inner(
+        rdr: &mut BufReader<File>,
+        offset: u64,
+        len: usize,
+    ) -> GhalaDbResult<Bytes> {
         rdr.seek(SeekFrom::Start(offset))?;
         let mut v = vec![0u8; len];
         rdr.read_exact(&mut v)?;
         Ok(v)
-    }
-
-    #[allow(dead_code)]
-    pub fn as_memtable(&self) -> GhalaDbResult<BTreeMemTable> {
-        let mut buf = Self::get_rdr(&self.path)?;
-        let mut table = BTreeMemTable::new();
-        for (k, de) in self.index.iter() {
-            match de {
-                DiskEntry::Value { offset: _, len } => {
-                    let mut val = vec![0u8; *len];
-                    buf.read_exact(&mut val)?;
-                    table.insert(k.clone(), val);
-                }
-                DiskEntry::Tombstone => table.delete(k.clone()),
-            }
-        }
-
-        Ok(table)
     }
 
     pub(crate) fn iter(&self) -> GhalaDbResult<SSTableIter> {
@@ -206,14 +203,16 @@ pub(crate) struct SSTableIter {
     index: IntoIter<Bytes, DiskEntry>,
 }
 impl SSTableIter {
-    pub(crate) fn new(buf: BufReader<File>, index: SstIndex) -> GhalaDbResult<SSTableIter> {
+    pub fn new(buf: BufReader<File>, index: SstIndex) -> GhalaDbResult<SSTableIter> {
         Ok(SSTableIter {
             buf,
             index: index.into_iter(),
         })
     }
-    fn read_val(&mut self, offset: u64, len: usize) -> GhalaDbResult<Bytes> {
-        SSTable::read_val_inner(&mut self.buf, offset, len)
+    fn read_val(&mut self, offset: u64, len: usize) -> GhalaDbResult<ValueEntry> {
+        let bytes = SSTable::read_val_inner(&mut self.buf, offset, len)?;
+        let dp: DataPtr = bincode::deserialize(&bytes)?;
+        Ok(ValueEntry::Val(dp))
     }
 }
 impl Iterator for SSTableIter {
@@ -222,10 +221,10 @@ impl Iterator for SSTableIter {
         if let Some((k, de)) = self.index.next() {
             match de {
                 DiskEntry::Tombstone => Some(Ok((k, ValueEntry::Tombstone))),
-                DiskEntry::Value { offset, len } => Some(
-                    self.read_val(offset, len)
-                        .map(|bytes| (k, ValueEntry::Val(bytes))),
-                ),
+                DiskEntry::Value { offset, len } => {
+                    let kv = self.read_val(offset, len).map(|v| (k, v));
+                    Some(kv)
+                }
             }
         } else {
             None
@@ -245,7 +244,9 @@ impl SSTableWriter {
     pub fn new(path: &PathBuf, seq_num: u64) -> GhalaDbResult<SSTableWriter> {
         Ok(SSTableWriter {
             path: path.clone(),
-            buf: BufWriter::new(OpenOptions::new().write(true).create(true).open(path)?),
+            buf: BufWriter::new(
+                OpenOptions::new().write(true).create(true).open(path)?,
+            ),
             offset: 0u64,
             index: SstIndex::new(),
             seq_num,
@@ -257,7 +258,8 @@ impl SSTableWriter {
             ValueEntry::Tombstone => {
                 self.index.insert(k, DiskEntry::Tombstone);
             }
-            ValueEntry::Val(bytes) => {
+            ValueEntry::Val(dp) => {
+                let bytes = bincode::serialize(&dp)?;
                 self.buf.write_all(&bytes)?;
                 self.index.insert(
                     k,

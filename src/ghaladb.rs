@@ -68,7 +68,7 @@ impl GhalaDB {
     pub fn put(&mut self, key: Bytes, val: Bytes) -> GhalaDbResult<()> {
         trace!("updating: {key:?}");
         let de = DataEntry::new(key.clone(), val);
-        let dp = t!("vlogman::put", self.vlogs_man.put(de))?;
+        let dp = t!("vlogman::put", self.vlogs_man.put(&de))?;
         t!("keyman::put", self.keyman.put(key, dp))?;
         t!("gc", self.gc())?;
 

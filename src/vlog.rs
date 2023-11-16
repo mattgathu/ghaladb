@@ -1,9 +1,11 @@
 use crate::{
     config::DatabaseOptions,
     core::{DataEntrySz, DataPtr, VlogNum},
+    error::{GhalaDBError, GhalaDbResult},
     utils::t,
 };
 use serde::{Deserialize, Serialize};
+use snap::raw::{Decoder, Encoder};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
@@ -11,7 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::error::{GhalaDBError, GhalaDbResult};
+#[cfg(test)]
+use crate::core::FixtureGen;
 
 const VLOG_INFO_FILE: &str = "vlog_info";
 
@@ -32,13 +35,14 @@ impl DataEntry {
     pub fn new(key: Bytes, val: Bytes) -> DataEntry {
         Self { key, val }
     }
-    pub fn mem_sz(&self) -> usize {
-        std::mem::size_of_val(self)
-    }
-    pub fn serde_sz(&self) -> usize {
-        //TODO: test bicode 16 extra bytes thing
-        //or use mem size
-        self.key.len() + self.val.len() + 16
+}
+#[cfg(test)]
+impl FixtureGen<DataEntry> for DataEntry {
+    fn gen() -> DataEntry {
+        DataEntry {
+            key: Bytes::gen(),
+            val: Bytes::gen(),
+        }
     }
 }
 
@@ -47,11 +51,13 @@ pub(crate) struct Vlog {
     wtr: BufWriter<File>,
     num: VlogNum,
     write_offset: u64,
-    buf: Vec<(DataPtr, DataEntry)>,
+    buf: Vec<(DataPtr, Bytes)>,
     conf: VlogConfig,
     buf_size: usize,
     path: PathBuf,
     active: bool,
+    encoder: Encoder,
+    decoder: Decoder,
 }
 
 impl Vlog {
@@ -73,6 +79,8 @@ impl Vlog {
             buf_size: 0usize,
             path,
             active: true,
+            encoder: Encoder::new(),
+            decoder: Decoder::new(),
         }
     }
 
@@ -96,50 +104,57 @@ impl Vlog {
 
     // TODO: can we cache hot entries in mem
     fn get(&mut self, dp: &DataPtr) -> GhalaDbResult<DataEntry> {
-        if let Some(de) = self.get_from_buf(dp) {
+        if let Some(de) = self.get_from_buf(dp)? {
             return Ok(de);
         }
-        let mut buf = vec![0u8; dp.len as usize];
-        self.rdr.seek(SeekFrom::Start(dp.offset))?;
-        self.rdr.read_exact(&mut buf)?;
-        let data = bincode::deserialize(&buf)?;
-        Ok(data)
+        self.get_from_disk(dp)
     }
 
-    fn get_from_buf(&self, dp: &DataPtr) -> Option<DataEntry> {
+    fn get_from_buf(&mut self, dp: &DataPtr) -> GhalaDbResult<Option<DataEntry>> {
         if let Ok(index) = self
             .buf
             .binary_search_by(|item| item.0.offset.cmp(&dp.offset))
         {
-            let (_dp, de) = self.buf.get(index).unwrap();
-            Some(de.clone())
+            let (_dp, de_bytes) = self.buf.get(index).cloned().unwrap();
+            let de = self.de(&de_bytes)?;
+            Ok(Some(de))
         } else {
-            None
+            Ok(None)
         }
     }
+    fn get_from_disk(&mut self, dp: &DataPtr) -> GhalaDbResult<DataEntry> {
+        let mut buf = vec![0u8; dp.len as usize];
+        self.rdr.seek(SeekFrom::Start(dp.offset))?;
+        self.rdr.read_exact(&mut buf)?;
+        t!("vlog::de", self.de(&buf))
+    }
 
-    fn write_to_buf(&mut self, de: DataEntry) -> GhalaDbResult<DataPtr> {
-        debug_assert!(self.conf.mem_buf_enabled, "mem buf not enabled");
-        let de_sz = de.serde_sz();
-        if self.buf_size + de_sz > self.conf.mem_buf_size {
+    fn write_to_buf(&mut self, de: &DataEntry) -> GhalaDbResult<DataPtr> {
+        let offset = self.write_offset;
+        let de_bytes = self.ser(de)?;
+        let dp_sz = DataPtr::serde_sz() as u64;
+        if self.buf_size + de_bytes.len() > self.conf.mem_buf_size {
             self.flush_buf()?;
         }
-        let dp_sz = DataPtr::serde_sz() as u64;
-        let offset = self.write_offset;
-        self.write_offset += dp_sz + de_sz as u64;
-        let dp = DataPtr::new(self.num, offset + dp_sz, de_sz as u32);
-        self.buf_size += de.mem_sz() + dp.mem_sz();
-        self.buf.push((dp, de));
-        debug_assert!(self.buf_invariant_ok(), "buf invariant violated");
+        let dp = DataPtr::new(
+            self.num,
+            offset + dp_sz,
+            de_bytes.len() as u32,
+            self.conf.compress,
+        );
+        self.buf_size += de_bytes.len() + dp_sz as usize;
+        self.write_offset += dp_sz + de_bytes.len() as u64;
+        self.buf.push((dp, de_bytes));
 
+        debug_assert!(self.buf_invariant_ok(), "buf invariant violated");
         Ok(dp)
     }
 
-    fn put(&mut self, entry: DataEntry) -> GhalaDbResult<DataPtr> {
+    fn put(&mut self, entry: &DataEntry) -> GhalaDbResult<DataPtr> {
         if self.conf.mem_buf_enabled {
             self.write_to_buf(entry)
         } else {
-            let dp = t!("vlog::write_entry", self.write_entry(&entry, None))?;
+            let dp = t!("vlog::write_entry", self.write_de(entry))?;
             self.wtr.flush()?;
             Ok(dp)
         }
@@ -150,36 +165,55 @@ impl Vlog {
     }
 
     fn flush_buf(&mut self) -> GhalaDbResult<()> {
-        let mut buf = vec![];
-        std::mem::swap(&mut buf, &mut self.buf);
-        for (dp, de) in buf {
-            self.write_entry(&de, Some(dp))?;
+        for (dp, de_bytes) in &self.buf {
+            // write to file
+            let dp_offset = dp.offset - DataPtr::serde_sz() as u64;
+            debug_assert!(
+                Some(dp_offset) == self.wtr.stream_position().ok(),
+                "offset do not match"
+            );
+            self.wtr.seek(SeekFrom::Start(dp_offset))?;
+            self.wtr.write_all(&bincode::serialize(dp)?)?;
+            self.wtr.write_all(de_bytes)?;
         }
         self.wtr.flush()?;
+        self.buf.clear();
+        self.buf_size = 0;
         debug_assert!(self.buf.is_empty(), "buf not empty after flush");
         Ok(())
     }
-
-    fn write_entry(
-        &mut self,
-        de: &DataEntry,
-        dp_opt: Option<DataPtr>,
-    ) -> GhalaDbResult<DataPtr> {
-        let de_bytes = bincode::serialize(&de)?;
-        let de_sz: DataEntrySz = de_bytes.len() as u32;
+    fn ser(&mut self, de: &DataEntry) -> GhalaDbResult<Bytes> {
+        let de_bytes = bincode::serialize(de)?;
+        if self.conf.compress {
+            Ok(self.encoder.compress_vec(&de_bytes)?)
+        } else {
+            Ok(de_bytes)
+        }
+    }
+    fn de(&mut self, buf: &[u8]) -> GhalaDbResult<DataEntry> {
+        let bytes = if self.conf.compress {
+            self.decoder.decompress_vec(buf)?
+        } else {
+            buf.to_vec()
+        };
+        let de: DataEntry = bincode::deserialize(&bytes)?;
+        Ok(de)
+    }
+    fn write_de(&mut self, de: &DataEntry) -> GhalaDbResult<DataPtr> {
+        let offset = self.write_offset;
+        let de_bytes = self.ser(de)?;
         let dp_sz = DataPtr::serde_sz() as u64;
-
-        let dp = dp_opt.unwrap_or_else(|| {
-            DataPtr::new(self.num, self.write_offset + dp_sz, de_sz)
-        });
+        let dp = DataPtr::new(
+            self.num,
+            offset + dp_sz,
+            de_bytes.len() as u32,
+            self.conf.compress,
+        );
         let dp_bytes = bincode::serialize(&dp)?;
-
-        let offset = dp.offset - dp_sz;
-        self.wtr.seek(SeekFrom::Start(offset))?;
         self.wtr.write_all(&dp_bytes)?;
         self.wtr.write_all(&de_bytes)?;
-        self.write_offset += dp_sz;
-        self.write_offset += de_bytes.len() as u64;
+        self.write_offset += (de_bytes.len() + dp_bytes.len()) as u64;
+
         Ok(dp)
     }
 
@@ -209,6 +243,7 @@ impl Drop for Vlog {
         if self.conf.mem_buf_enabled {
             debug!("flushing mem buf");
             self.flush_buf().ok();
+            self.wtr.flush().ok();
             debug_assert!(self.buf.is_empty(), "buf not empty at drop");
         }
         if !self.active {
@@ -218,17 +253,27 @@ impl Drop for Vlog {
 }
 pub(crate) struct VlogIter {
     rdr: BufReader<File>,
+    decoder: Decoder,
 }
 impl VlogIter {
     pub fn from_path(path: &Path) -> GhalaDbResult<Self> {
         let rdr = BufReader::new(OpenOptions::new().read(true).open(path)?);
-        Ok(Self { rdr })
+        let decoder = Decoder::new();
+        Ok(Self { rdr, decoder })
     }
-    fn read_de(&mut self, sz: DataEntrySz) -> GhalaDbResult<DataEntry> {
+    fn read_de(
+        &mut self,
+        sz: DataEntrySz,
+        compressed: bool,
+    ) -> GhalaDbResult<DataEntry> {
         let mut buf = vec![0u8; sz as usize];
         self.rdr.read_exact(&mut buf)?;
-        let de: DataEntry = bincode::deserialize(&buf)?;
-        Ok(de)
+        let buf = if compressed {
+            self.decoder.decompress_vec(&buf)?
+        } else {
+            buf
+        };
+        Ok(bincode::deserialize(&buf)?)
     }
     fn read_dp(&mut self) -> GhalaDbResult<Option<DataPtr>> {
         let dp_sz = DataPtr::serde_sz();
@@ -246,7 +291,7 @@ impl VlogIter {
     }
     pub fn next_entry(&mut self) -> GhalaDbResult<Option<(DataPtr, DataEntry)>> {
         if let Some(dp) = self.read_dp()? {
-            let de = self.read_de(dp.len)?;
+            let de = self.read_de(dp.len, dp.compressed)?;
             Ok(Some((dp, de)))
         } else {
             Ok(None)
@@ -268,12 +313,14 @@ impl Iterator for VlogIter {
 pub(crate) struct VlogConfig {
     mem_buf_enabled: bool,
     mem_buf_size: usize,
+    compress: bool,
 }
 impl From<&DatabaseOptions> for VlogConfig {
     fn from(opts: &DatabaseOptions) -> Self {
         Self {
             mem_buf_enabled: opts.vlog_mem_buf_enabled,
             mem_buf_size: opts.vlog_mem_buf_size,
+            compress: opts.compress,
         }
     }
 }
@@ -346,12 +393,20 @@ impl VlogsMan {
             .ok_or_else(|| GhalaDBError::MissingVlog(dp.vlog))?;
         vlog.get(dp)
     }
-    pub fn put(&mut self, entry: DataEntry) -> GhalaDbResult<DataPtr> {
+    pub fn put(&mut self, entry: &DataEntry) -> GhalaDbResult<DataPtr> {
         let vlog = self.get_tail()?;
         vlog.put(entry)
     }
 
     //TODO: find better heuristic
+    //
+    // 1: Use age threshold
+    //
+    // The basic idea of our algorithm is that segments that have been recently
+    // filled by writes from the system should be forced to wait for a certain
+    // amount of time (the age-threshold) before they are allowed to become
+    // candidates for garbage collect
+    //
     pub fn needs_gc(&mut self) -> GhalaDbResult<Option<(VlogNum, PathBuf)>> {
         if self.vlogs.len() > 3 {
             let vnum = self.vlogs.keys().next().unwrap();
@@ -421,6 +476,17 @@ mod tests {
     use super::*;
     use crate::core::FixtureGen;
     use tempfile::tempdir;
+    use tempfile::TempDir;
+    fn init_vlog(temp_dir: &TempDir) -> GhalaDbResult<Vlog> {
+        let file_path = temp_dir.path().join("test_vlog.db");
+        let conf = VlogConfig {
+            mem_buf_enabled: true,
+            mem_buf_size: 1024,
+            compress: true,
+        };
+
+        Vlog::from_path(file_path.clone(), 1, conf)
+    }
 
     #[test]
     fn vlog_iter() -> GhalaDbResult<()> {
@@ -429,13 +495,14 @@ mod tests {
         let conf = VlogConfig {
             mem_buf_size: 1_000_000,
             mem_buf_enabled: true,
+            compress: true,
         };
         let mut vlog = Vlog::from_path(path.clone(), 1, conf)?;
         let data: Vec<DataEntry> = (0..100)
             .map(|_| DataEntry::new(Bytes::gen(), Bytes::gen()))
             .collect();
         for de in &data {
-            vlog.put(de.clone())?;
+            vlog.put(de)?;
         }
         drop(vlog);
         let vlog_iter = VlogIter::from_path(&path)?;
@@ -453,6 +520,54 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn vlog_write_and_read() -> GhalaDbResult<()> {
+        let mut vlog = init_vlog(&tempdir()?)?;
+        let test_entry = DataEntry {
+            key: vec![1, 2, 3],
+            val: vec![4, 5, 6],
+        };
+        let data_ptr = vlog.put(&test_entry)?;
+        let read_entry = vlog.get(&data_ptr)?;
+        assert_eq!(read_entry, test_entry);
+        Ok(())
+    }
+
+    #[test]
+    fn vlog_flush() -> GhalaDbResult<()> {
+        let mut vlog = init_vlog(&tempdir()?)?;
+        let test_entry = DataEntry {
+            key: vec![1, 2, 3],
+            val: vec![4, 5, 6],
+        };
+        vlog.put(&test_entry)?;
+        vlog.flush_buf()?;
+        Ok(())
+    }
+
+    #[test]
+    fn vlog_deactivate() -> GhalaDbResult<()> {
+        let temp_dir = tempdir()?;
+        let mut vlog = init_vlog(&temp_dir)?;
+        vlog.deactivate();
+        drop(vlog);
+        assert!(!temp_dir.path().join("test_vlog.db").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn vlog_flush_buf() -> GhalaDbResult<()> {
+        let mut vlog = init_vlog(&tempdir()?)?;
+
+        vlog.write_to_buf(&DataEntry::gen())?;
+        vlog.write_to_buf(&DataEntry::gen())?;
+        vlog.flush_buf()?;
+
+        assert!(vlog.buf.is_empty());
+        assert_eq!(vlog.buf_size, 0);
         Ok(())
     }
 }

@@ -14,7 +14,8 @@ pub struct DatabaseOptions {
     /// vlog memory buffer size in bytes: default 8mb
     #[builder(default = 8_000_000)]
     pub vlog_mem_buf_size: usize,
-    /// Synchronous write IO flag. If enabled all writes will be flushed to disk.
+    /// Synchronous write IO flag. If enabled all writes will be flushed to
+    /// disk.
     #[builder(default = false)]
     pub sync: bool,
     /// Read Timeout. Timeout in milliseconds for data lookups.
@@ -26,4 +27,7 @@ pub struct DatabaseOptions {
     /// vlog compaction enabled
     #[builder(default = true)]
     pub vlog_compaction_enabled: bool,
+    /// compress data
+    #[builder(default = true)]
+    pub compress: bool,
 }

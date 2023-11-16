@@ -71,8 +71,8 @@ impl Default for BTreeMemTable {
 
 impl Add for BTreeMemTable {
     type Output = Self;
-    /// Merge two mem tables. Incase of key collisions the values in the newer (right) table
-    /// are considered as the latest.
+    /// Merge two mem tables. Incase of key collisions the values in the newer
+    /// (right) table are considered as the latest.
     fn add(mut self, rhs: Self) -> Self::Output {
         self.map.extend(rhs.map);
         self.update_memsize();

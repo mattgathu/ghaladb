@@ -486,7 +486,7 @@ mod tests {
         let mut kman = KeyMan::new(tmp_dir.path(), opts.clone())?;
         let data: Vec<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
         for k in &data {
-            let dp = DataPtr::new(0, k.len() as u64, k.len() as u32);
+            let dp = DataPtr::new(0, k.len() as u64, k.len() as u32, false);
             kman.put(k.clone(), dp)?;
         }
         drop(kman);

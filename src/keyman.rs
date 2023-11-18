@@ -6,6 +6,8 @@ use crate::{
     sstable::{SSTable, SSTableIter, SSTableWriter},
     utils::t,
 };
+use contracts::*;
+use std::cmp::Ordering;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs::OpenOptions,
@@ -74,12 +76,12 @@ impl KeyMan {
     }
     /// Attempts to sync in-memory data to disk.
     pub fn sync(&mut self) -> GhalaDbResult<()> {
-        if !self.mem.is_empty() {
-            t!("keyman::flush_mem", self.flush_mem())?;
-        }
+        t!("keyman::flush_mem", self.flush_mem())?;
         t!("ssm::sync", self.ssm.sync())?;
         Ok(())
     }
+
+    #[debug_ensures(self.mem.is_empty())]
     fn flush_mem(&mut self) -> GhalaDbResult<()> {
         if self.mem.is_empty() {
             warn!("got empty memtable to flush.");
@@ -108,18 +110,18 @@ impl Drop for KeyMan {
 }
 type LevelsOnDisk = BTreeMap<usize, Vec<PathBuf>>;
 type Levels = BTreeMap<usize, VecDeque<SSTable>>;
-type SequenceNumber = u64;
+type SeqNum = u64;
 struct CompactionResult {
     level: usize,
     sst: SSTable,
-    seq_nums: HashSet<SequenceNumber>,
+    seq_nums: HashSet<SeqNum>,
 }
 
 #[derive(Debug)]
 pub(crate) struct StoreSysMan {
     base_path: PathBuf,
     max_tables: usize,
-    sequence: SequenceNumber,
+    sequence: SeqNum,
     rx: Option<Receiver<CompactionResult>>,
     levels: Levels,
 }
@@ -189,18 +191,18 @@ impl StoreSysMan {
         }
         Err(GhalaDBError::MissingValueEntry(key.to_vec()))
     }
-    fn build_sst_path(&mut self) -> GhalaDbResult<(SequenceNumber, PathBuf)> {
+
+    fn build_sst_path(&mut self) -> GhalaDbResult<(SeqNum, PathBuf)> {
         self.sequence += 1;
         let sst_name = format!("{}.sst", self.sequence);
         Ok((self.sequence, self.base_path.join(sst_name)))
     }
 
+    #[debug_requires(!table.is_empty(), "cannot flush empty mem table")]
     pub fn flush_mem_table(
         &mut self,
         table: impl MemTable,
     ) -> GhalaDbResult<PathBuf> {
-        debug_assert!(!table.is_empty(), "cannot flush empty mem table");
-
         let (seq_num, sst_path) = self.build_sst_path()?;
         debug_assert!(
             !sst_path.exists(),
@@ -279,6 +281,7 @@ impl StoreSysMan {
 
         Ok(accum)
     }
+
     pub fn sync(&mut self) -> GhalaDbResult<()> {
         debug!("checking pending compaction before shutdown");
         while self.rx.is_some() {
@@ -288,6 +291,7 @@ impl StoreSysMan {
         self.dump_levels_info()?;
         Ok(())
     }
+
     fn handle_compaction(&mut self) -> GhalaDbResult<()> {
         if let Some(ref rx) = self.rx {
             match rx.recv_timeout(Duration::from_millis(100)) {
@@ -359,7 +363,7 @@ impl StoreSysMan {
     fn compact(
         level: usize,
         ssts: Vec<SSTableIter>,
-        seq_nums: HashSet<SequenceNumber>,
+        seq_nums: HashSet<SeqNum>,
         tx: Sender<CompactionResult>,
         path: PathBuf,
         seq_num: u64,
@@ -448,27 +452,44 @@ where
     rhs: Peekable<J>,
 }
 
-impl<I: Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>, J> Iterator
-    for MergeSorted<I, J>
+impl<I, J> Iterator for MergeSorted<I, J>
 where
+    I: Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>,
     J: Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>,
 {
     type Item = GhalaDbResult<(Bytes, ValueEntry)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match (self.lhs.peek(), self.rhs.peek()) {
-            (Some(&Err(_)), _) => self.lhs.next(),
-            (_, Some(&Err(_))) => self.rhs.next(),
-            (Some(Ok(ref l)), Some(Ok(ref r))) if l.0 == r.0 => {
-                _ = self.rhs.next();
-                self.lhs.next()
-            }
-            (Some(Ok(ref l)), Some(Ok(ref r))) if l.0 < r.0 => self.lhs.next(),
-            (Some(&Ok(_)), Some(&Ok(_))) => self.rhs.next(),
-            (Some(&Ok(_)), None) => self.lhs.next(),
-            (None, Some(&Ok(_))) => self.rhs.next(),
-            (None, None) => None,
+        // handle errors
+        if let Some(&Err(_)) = self.lhs.peek() {
+            return self.lhs.next();
         }
+        if let Some(&Err(_)) = self.rhs.peek() {
+            return self.rhs.next();
+        }
+        // handle ordering - return smallest first
+        if let (Some(Ok(ref l)), Some(Ok(ref r))) =
+            (self.lhs.peek(), self.rhs.peek())
+        {
+            match l.0.cmp(&r.0) {
+                Ordering::Equal => {
+                    // discard old value
+                    self.rhs.next();
+                    return self.lhs.next();
+                }
+                Ordering::Less => return self.lhs.next(),
+                Ordering::Greater => return self.rhs.next(),
+            }
+        }
+        // handle remainders
+        if let Some(&Ok(_)) = self.lhs.peek() {
+            return self.lhs.next();
+        }
+        if let Some(&Ok(_)) = self.rhs.peek() {
+            return self.rhs.next();
+        }
+        // base case
+        None
     }
 }
 

@@ -21,7 +21,9 @@ impl ValueEntry {
         }
     }
 }
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Hash, PartialOrd, Ord, Eq,
+)]
 pub struct DataPtr {
     pub vlog: VlogNum,
     pub offset: u64,

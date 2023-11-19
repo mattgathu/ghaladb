@@ -7,8 +7,8 @@ use crate::{
     utils::t,
 };
 use contracts::*;
-use std::cmp::Ordering;
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashSet, VecDeque},
     fs::OpenOptions,
     io::{BufReader, BufWriter},

@@ -1,3 +1,4 @@
+use contracts::*;
 use patricia_tree::{map::IntoIter, GenericPatriciaMap};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,13 +44,13 @@ pub(crate) struct SSTable {
 }
 
 impl SSTable {
+    #[debug_requires(!index.is_empty(), "sst index should not be empty")]
     pub fn new(
         path: PathBuf,
         index: SstIndex,
         seq_num: u64,
         rdr: BufReader<File>,
     ) -> SSTable {
-        debug_assert!(!index.is_empty());
         let first_key = index.keys().next().unwrap().to_owned();
         let last_key = index.keys().last().unwrap().to_owned();
         let mem_size: usize = index
@@ -74,6 +75,7 @@ impl SSTable {
         }
     }
 
+    #[debug_requires(path.as_ref().exists())]
     pub fn from_path<P: AsRef<Path>>(path: P) -> GhalaDbResult<SSTable> {
         let meta = Self::load_meta(&path)?;
         let reader = Self::get_rdr(&path)?;
@@ -106,6 +108,7 @@ impl SSTable {
         self.mem_size
     }
 
+    #[debug_requires(self.active)]
     pub fn deactivate(&mut self) {
         self.active = false;
     }
@@ -118,6 +121,7 @@ impl SSTable {
         Ok(BufReader::new(OpenOptions::new().read(true).open(path)?))
     }
 
+    #[debug_requires(path.as_ref().exists())]
     fn load_meta<P: AsRef<Path>>(path: P) -> GhalaDbResult<SstMetadata> {
         let mut rdr = Self::get_rdr(&path)?;
         rdr.seek(SeekFrom::End(-FOOTER_SIZE))?;
@@ -173,8 +177,9 @@ impl SSTable {
         SSTableIter::new(buf, index)
     }
 
+    #[debug_requires(!self.active, "cannot del active sst")]
+    #[debug_ensures(!self.path.exists())]
     fn delete(&self) -> GhalaDbResult<()> {
-        debug_assert!(!self.active, "deleting active sst");
         debug!(
             "deleting sst at: {} active: {}",
             self.path.display(),

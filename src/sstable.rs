@@ -1,3 +1,4 @@
+use crate::dec::Dec;
 use contracts::*;
 use patricia_tree::{map::IntoIter, GenericPatriciaMap};
 use serde::{Deserialize, Serialize};
@@ -137,7 +138,7 @@ impl SSTable {
         rdr.seek(SeekFrom::End(off_set))?;
         let mut buf = vec![0u8; meta_sz as usize];
         rdr.read_exact(&mut buf)?;
-        let meta: SstMetadata = bincode::deserialize(&buf).map_err(|e| {
+        let meta: SstMetadata = Dec::deser_raw(&buf).map_err(|e| {
             error!("failed to deser sst metadata. Reason: {:?}", e);
             e
         })?;
@@ -156,7 +157,7 @@ impl SSTable {
         len: usize,
     ) -> GhalaDbResult<Option<DataPtr>> {
         let bytes = Self::read_val_inner(&mut self.rdr, offset, len)?;
-        let dp: DataPtr = bincode::deserialize(&bytes)?;
+        let dp: DataPtr = Dec::deser_raw(&bytes)?;
         Ok(Some(dp))
     }
 
@@ -216,7 +217,7 @@ impl SSTableIter {
     }
     fn read_val(&mut self, offset: u64, len: usize) -> GhalaDbResult<ValueEntry> {
         let bytes = SSTable::read_val_inner(&mut self.buf, offset, len)?;
-        let dp: DataPtr = bincode::deserialize(&bytes)?;
+        let dp: DataPtr = Dec::deser_raw(&bytes)?;
         Ok(ValueEntry::Val(dp))
     }
 }
@@ -264,7 +265,7 @@ impl SSTableWriter {
                 self.index.insert(k, DiskEntry::Tombstone);
             }
             ValueEntry::Val(dp) => {
-                let bytes = bincode::serialize(&dp)?;
+                let bytes = Dec::ser_raw(&dp)?;
                 self.buf.write_all(&bytes)?;
                 self.index.insert(
                     k,
@@ -285,7 +286,7 @@ impl SSTableWriter {
             index: self.index,
             seq_num: self.seq_num,
         };
-        let meta = bincode::serialize(&metadata)?;
+        let meta = Dec::ser_raw(&metadata)?;
         self.buf.write_all(&meta)?;
         // write footer
         let meta_sz = meta.len() as u64;

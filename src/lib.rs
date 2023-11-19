@@ -12,6 +12,7 @@ extern crate log;
 
 mod config;
 mod core;
+mod dec;
 pub mod error;
 mod gc;
 mod ghaladb;

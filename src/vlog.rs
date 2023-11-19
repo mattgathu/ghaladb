@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::core::FixtureGen;
+use crate::dec::Dec;
 use crate::{
     config::DatabaseOptions,
     core::{DataEntrySz, DataPtr, VlogNum},
@@ -9,7 +10,6 @@ use crate::{
 #[allow(unused_imports)]
 use contracts::*;
 use serde::{Deserialize, Serialize};
-use snap::raw::{Decoder, Encoder};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
@@ -57,8 +57,7 @@ pub(crate) struct Vlog {
     buf_sz: usize,
     path: PathBuf,
     active: bool,
-    encoder: Option<Encoder>,
-    decoder: Option<Decoder>,
+    dec: Dec,
 }
 
 impl Vlog {
@@ -70,11 +69,7 @@ impl Vlog {
         conf: VlogConfig,
         path: PathBuf,
     ) -> Vlog {
-        let (encoder, decoder) = if conf.compress {
-            (Some(Encoder::new()), Some(Decoder::new()))
-        } else {
-            (None, None)
-        };
+        let dec = Dec::new(conf.compress);
         Vlog {
             rdr,
             wtr,
@@ -85,8 +80,7 @@ impl Vlog {
             buf_sz: 0usize,
             path,
             active: true,
-            encoder,
-            decoder,
+            dec,
         }
     }
 
@@ -188,7 +182,7 @@ impl Vlog {
             let s_pos = self.wtr.stream_position().ok();
             debug_assert!(Some(dp_offset) == s_pos, "offset do not match");
             self.wtr.seek(SeekFrom::Start(dp_offset))?;
-            self.wtr.write_all(&bincode::serialize(dp)?)?;
+            self.wtr.write_all(&Dec::ser_raw(dp)?)?;
             self.wtr.write_all(de_bytes)?;
         }
         self.wtr.flush()?;
@@ -198,22 +192,11 @@ impl Vlog {
     }
 
     fn ser(&mut self, de: &DataEntry) -> GhalaDbResult<Bytes> {
-        let de_bytes = bincode::serialize(de)?;
-        let ret = if let Some(ref mut enc) = self.encoder {
-            enc.compress_vec(&de_bytes)?
-        } else {
-            de_bytes
-        };
-        Ok(ret)
+        self.dec.ser(de)
     }
 
     fn de(&mut self, buf: &[u8]) -> GhalaDbResult<DataEntry> {
-        let de: DataEntry = if let Some(ref mut dec) = self.decoder {
-            bincode::deserialize(&dec.decompress_vec(buf)?)?
-        } else {
-            bincode::deserialize(buf)?
-        };
-        Ok(de)
+        self.dec.deser(buf)
     }
 
     fn write_de(&mut self, de: &DataEntry) -> GhalaDbResult<DataPtr> {
@@ -226,7 +209,7 @@ impl Vlog {
             de_bytes.len() as u32,
             self.conf.compress,
         );
-        let dp_bytes = bincode::serialize(&dp)?;
+        let dp_bytes = Dec::ser_raw(&dp)?;
         self.wtr.write_all(&dp_bytes)?;
         self.wtr.write_all(&de_bytes)?;
         self.w_off += (de_bytes.len() + dp_bytes.len()) as u64;
@@ -277,13 +260,13 @@ impl Drop for Vlog {
 }
 pub(crate) struct VlogIter {
     rdr: BufReader<File>,
-    decoder: Decoder,
+    dec: Dec,
 }
 impl VlogIter {
     pub fn from_path(path: &Path) -> GhalaDbResult<Self> {
         let rdr = BufReader::new(OpenOptions::new().read(true).open(path)?);
-        let decoder = Decoder::new();
-        Ok(Self { rdr, decoder })
+        let dec = Dec::new(true);
+        Ok(Self { rdr, dec })
     }
     fn read_de(
         &mut self,
@@ -292,12 +275,12 @@ impl VlogIter {
     ) -> GhalaDbResult<DataEntry> {
         let mut buf = vec![0u8; sz as usize];
         self.rdr.read_exact(&mut buf)?;
-        let buf = if compressed {
-            self.decoder.decompress_vec(&buf)?
+        let de = if compressed {
+            self.dec.deser(&buf)?
         } else {
-            buf
+            Dec::deser_raw(&buf)?
         };
-        Ok(bincode::deserialize(&buf)?)
+        Ok(de)
     }
     fn read_dp(&mut self) -> GhalaDbResult<Option<DataPtr>> {
         let dp_sz = DataPtr::serde_sz();
@@ -313,7 +296,7 @@ impl VlogIter {
                 return Err(GhalaDBError::IOError(e));
             }
         }
-        let dp: DataPtr = bincode::deserialize(&buf)?;
+        let dp: DataPtr = Dec::deser_raw(&buf)?;
         Ok(Some(dp))
     }
     pub fn next_entry(&mut self) -> GhalaDbResult<Option<(DataPtr, DataEntry)>> {
@@ -397,19 +380,25 @@ impl VlogsMan {
     #[debug_ensures(self.base_path.join(VLOG_INFO_FILE).exists())]
     fn dump_vlogs_info(&self) -> GhalaDbResult<()> {
         let path = self.base_path.join(VLOG_INFO_FILE);
-        let wtr =
+        let mut wtr =
             BufWriter::new(OpenOptions::new().create(true).write(true).open(path)?);
         let info = VlogsInfo {
             vlogs: self.vlogs.keys().copied().collect(),
         };
-        bincode::serialize_into(wtr, &info)?;
+        let mut dec = Dec::new(true);
+        let bytes = dec.ser(&info)?;
+        wtr.write_all(&bytes)?;
+
         Ok(())
     }
 
     fn load_vlogs_info(path: PathBuf) -> GhalaDbResult<VlogsInfo> {
         if path.exists() {
-            let reader = BufReader::new(OpenOptions::new().read(true).open(&path)?);
-            let info: VlogsInfo = bincode::deserialize_from(reader)?;
+            let mut rdr = BufReader::new(OpenOptions::new().read(true).open(&path)?);
+            let mut bytes = vec![];
+            rdr.read_to_end(&mut bytes)?;
+            let mut dec = Dec::new(true);
+            let info: VlogsInfo = dec.deser(&bytes)?;
             Ok(info)
         } else {
             Ok(VlogsInfo { vlogs: vec![] })

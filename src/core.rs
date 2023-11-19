@@ -64,7 +64,7 @@ impl FixtureGen<Bytes> for Bytes {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::GhalaDbResult;
+    use crate::{dec::Dec, error::GhalaDbResult};
 
     use super::*;
 
@@ -72,7 +72,7 @@ mod tests {
     fn dp_serde_sz() -> GhalaDbResult<()> {
         let dp = DataPtr::new(0, 0, 0, true);
         let serde_sz = DataPtr::serde_sz();
-        let bytes = bincode::serialize(&dp)?;
+        let bytes = Dec::ser_raw(&dp)?;
         assert_eq!(
             bytes.len(),
             serde_sz,

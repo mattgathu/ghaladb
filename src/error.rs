@@ -11,7 +11,9 @@ pub enum GhalaDBError {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
     #[error(transparent)]
-    BincodeError(#[from] bincode::Error),
+    BincodeEncodeError(#[from] bincode::error::EncodeError),
+    #[error(transparent)]
+    BincodeDecodeError(#[from] bincode::error::DecodeError),
     #[error(transparent)]
     SerdeJsonError(#[from] serde_json::Error),
     #[error(transparent)]

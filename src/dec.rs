@@ -40,7 +40,9 @@ impl Dec {
     where
         T: serde::de::DeserializeOwned,
     {
-        Ok(bincode::deserialize(bytes)?)
+        let config = Self::serde_config();
+
+        Ok(bincode::serde::decode_from_slice(bytes, config)?.0)
     }
 
     /// Serializes a serializable object into a `Vec` of bytes
@@ -64,6 +66,15 @@ impl Dec {
     where
         T: serde::Serialize,
     {
-        Ok(bincode::serialize(value)?)
+        let config = Self::serde_config();
+        Ok(bincode::serde::encode_to_vec(value, config)?)
+    }
+
+    #[inline]
+    fn serde_config() -> impl bincode::config::Config {
+        bincode::config::standard()
+            .with_little_endian()
+            .with_fixed_int_encoding()
+            .with_no_limit()
     }
 }

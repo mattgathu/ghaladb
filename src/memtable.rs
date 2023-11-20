@@ -3,10 +3,7 @@ use crate::{
     error::GhalaDbResult,
 };
 
-use std::{
-    collections::{btree_map::IntoIter, BTreeMap},
-    ops::Add,
-};
+use std::collections::{btree_map::IntoIter, BTreeMap};
 pub(crate) trait MemTable {
     fn contains(&self, key: KeyRef) -> bool;
     fn delete(&mut self, key: Bytes);
@@ -56,27 +53,6 @@ impl BTreeMemTable {
     fn iter(&self) -> IntoIter<Bytes, ValueEntry> {
         //TODO: avoid cloning
         self.map.clone().into_iter()
-    }
-
-    fn update_memsize(&mut self) {
-        self.mem_size = self.map.iter().map(|(k, v)| k.len() + v.mem_sz()).sum();
-    }
-}
-
-impl Default for BTreeMemTable {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Add for BTreeMemTable {
-    type Output = Self;
-    /// Merge two mem tables. Incase of key collisions the values in the newer
-    /// (right) table are considered as the latest.
-    fn add(mut self, rhs: Self) -> Self::Output {
-        self.map.extend(rhs.map);
-        self.update_memsize();
-        self
     }
 }
 

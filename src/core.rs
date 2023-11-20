@@ -13,14 +13,7 @@ pub(crate) enum ValueEntry {
     Tombstone,
     Val(DataPtr),
 }
-impl ValueEntry {
-    pub fn mem_sz(&self) -> usize {
-        match &self {
-            ValueEntry::Tombstone => 0,
-            ValueEntry::Val(dp) => dp.mem_sz(),
-        }
-    }
-}
+
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Hash, PartialOrd, Ord, Eq,
 )]

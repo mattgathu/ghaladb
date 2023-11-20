@@ -18,7 +18,6 @@ mod gc;
 mod ghaladb;
 mod keyman;
 mod memtable;
-mod sstable;
 mod utils;
 mod vlog;
 pub use crate::ghaladb::GhalaDB;

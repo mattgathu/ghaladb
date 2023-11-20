@@ -1,4 +1,9 @@
-use crate::dec::Dec;
+use crate::{
+    core::{Bytes, DataPtr, KeyRef, ValueEntry},
+    dec::Dec,
+    error::{GhalaDBError, GhalaDbResult},
+    utils::t,
+};
 use contracts::*;
 use patricia_tree::{map::IntoIter, GenericPatriciaMap};
 use serde::{Deserialize, Serialize};
@@ -9,13 +14,6 @@ use std::{
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
-
-use crate::{
-    core::DataPtr,
-    error::{GhalaDBError, GhalaDbResult},
-};
-
-use crate::core::{Bytes, KeyRef, ValueEntry};
 const FOOTER_SIZE: i64 = 8;
 
 pub type SstIndex = GenericPatriciaMap<Bytes, DiskEntry>;
@@ -30,6 +28,7 @@ pub enum DiskEntry {
 pub struct SstMetadata {
     index: SstIndex,
     seq_num: u64,
+    compressed: bool,
 }
 
 #[derive(Debug)]
@@ -41,6 +40,7 @@ pub(crate) struct SSTable {
     mem_size: usize,
     pub seq_num: u64,
     rdr: BufReader<File>,
+    dec: Dec,
     pub active: bool,
 }
 
@@ -51,6 +51,7 @@ impl SSTable {
         index: SstIndex,
         seq_num: u64,
         rdr: BufReader<File>,
+        dec: Dec,
     ) -> SSTable {
         let first_key = index.keys().next().unwrap().to_owned();
         let last_key = index.keys().last().unwrap().to_owned();
@@ -72,6 +73,7 @@ impl SSTable {
             mem_size,
             seq_num,
             rdr,
+            dec,
             active: true,
         }
     }
@@ -80,12 +82,14 @@ impl SSTable {
     pub fn from_path<P: AsRef<Path>>(path: P) -> GhalaDbResult<SSTable> {
         let meta = Self::load_meta(&path)?;
         let reader = Self::get_rdr(&path)?;
+        let dec = Dec::new(meta.compressed);
 
         Ok(SSTable::new(
             path.as_ref().to_path_buf(),
             meta.index,
             meta.seq_num,
             reader,
+            dec,
         ))
     }
 
@@ -138,17 +142,10 @@ impl SSTable {
         rdr.seek(SeekFrom::End(off_set))?;
         let mut buf = vec![0u8; meta_sz as usize];
         rdr.read_exact(&mut buf)?;
-        let meta: SstMetadata = Dec::deser_raw(&buf).map_err(|e| {
-            error!("failed to deser sst metadata. Reason: {:?}", e);
-            e
-        })?;
+        let meta: SstMetadata =
+            t!("SSTable::load_meta deser_raw", Dec::deser_raw(&buf))?;
 
         Ok(meta)
-    }
-
-    #[inline]
-    fn load_index(p: &Path) -> GhalaDbResult<SstIndex> {
-        Self::load_meta(p).map(|m| m.index)
     }
 
     fn read_val(
@@ -157,7 +154,7 @@ impl SSTable {
         len: usize,
     ) -> GhalaDbResult<Option<DataPtr>> {
         let bytes = Self::read_val_inner(&mut self.rdr, offset, len)?;
-        let dp: DataPtr = Dec::deser_raw(&bytes)?;
+        let dp: DataPtr = self.dec.deser(&bytes)?;
         Ok(Some(dp))
     }
 
@@ -173,9 +170,10 @@ impl SSTable {
     }
 
     pub(crate) fn iter(&self) -> GhalaDbResult<SSTableIter> {
-        let index = Self::load_index(&self.path)?;
+        let meta = Self::load_meta(&self.path)?;
+        let dec = Dec::new(meta.compressed);
         let buf = Self::get_rdr(&self.path)?;
-        SSTableIter::new(buf, index)
+        SSTableIter::new(buf, meta.index, dec)
     }
 
     #[debug_requires(!self.active, "cannot del active sst")]
@@ -194,12 +192,7 @@ impl SSTable {
 impl Drop for SSTable {
     fn drop(&mut self) {
         if !self.active {
-            self.delete()
-                .map_err(|e| {
-                    error!("failed to delete sst. Reason: {:#?}", e);
-                    e
-                })
-                .ok();
+            t!("SSTable::delete", self.delete()).ok();
         }
     }
 }
@@ -207,17 +200,23 @@ impl Drop for SSTable {
 pub(crate) struct SSTableIter {
     buf: BufReader<File>,
     index: IntoIter<Bytes, DiskEntry>,
+    dec: Dec,
 }
 impl SSTableIter {
-    pub fn new(buf: BufReader<File>, index: SstIndex) -> GhalaDbResult<SSTableIter> {
+    pub fn new(
+        buf: BufReader<File>,
+        index: SstIndex,
+        dec: Dec,
+    ) -> GhalaDbResult<SSTableIter> {
         Ok(SSTableIter {
             buf,
             index: index.into_iter(),
+            dec,
         })
     }
     fn read_val(&mut self, offset: u64, len: usize) -> GhalaDbResult<ValueEntry> {
         let bytes = SSTable::read_val_inner(&mut self.buf, offset, len)?;
-        let dp: DataPtr = Dec::deser_raw(&bytes)?;
+        let dp: DataPtr = self.dec.deser(&bytes)?;
         Ok(ValueEntry::Val(dp))
     }
 }
@@ -244,10 +243,17 @@ pub(crate) struct SSTableWriter {
     offset: u64,
     index: SstIndex,
     seq_num: u64,
+    compress: bool,
+    dec: Dec,
 }
 
 impl SSTableWriter {
-    pub fn new(path: &PathBuf, seq_num: u64) -> GhalaDbResult<SSTableWriter> {
+    pub fn new(
+        path: &PathBuf,
+        seq_num: u64,
+        compress: bool,
+    ) -> GhalaDbResult<SSTableWriter> {
+        let dec = Dec::new(compress);
         Ok(SSTableWriter {
             path: path.clone(),
             buf: BufWriter::new(
@@ -256,6 +262,8 @@ impl SSTableWriter {
             offset: 0u64,
             index: SstIndex::new(),
             seq_num,
+            compress,
+            dec,
         })
     }
 
@@ -265,7 +273,7 @@ impl SSTableWriter {
                 self.index.insert(k, DiskEntry::Tombstone);
             }
             ValueEntry::Val(dp) => {
-                let bytes = Dec::ser_raw(&dp)?;
+                let bytes = self.dec.ser(&dp)?;
                 self.buf.write_all(&bytes)?;
                 self.index.insert(
                     k,
@@ -285,6 +293,7 @@ impl SSTableWriter {
         let metadata = SstMetadata {
             index: self.index,
             seq_num: self.seq_num,
+            compressed: self.compress,
         };
         let meta = Dec::ser_raw(&metadata)?;
         self.buf.write_all(&meta)?;
@@ -294,9 +303,6 @@ impl SSTableWriter {
         self.buf.write_all(&footer)?;
         self.buf.flush()?;
 
-        SSTable::from_path(self.path).map_err(|e| {
-            debug!("got error loading sst from path: {}", e);
-            e
-        })
+        t!("SSTable::from_path", SSTable::from_path(self.path))
     }
 }

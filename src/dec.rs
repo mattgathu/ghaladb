@@ -35,7 +35,8 @@ impl Dec {
         };
         Ok(t)
     }
-    /// Deserializes a slice of bytes into an instance of `T` without decompressing
+    /// Deserializes a slice of bytes into an instance of `T` without
+    /// decompressing
     pub fn deser_raw<T>(bytes: &[u8]) -> crate::error::GhalaDbResult<T>
     where
         T: serde::de::DeserializeOwned,
@@ -61,7 +62,8 @@ impl Dec {
         };
         Ok(ret)
     }
-    /// Serializes a serializable object into a `Vec` of bytes without compression
+    /// Serializes a serializable object into a `Vec` of bytes without
+    /// compression
     pub fn ser_raw<T: ?Sized>(value: &T) -> crate::error::GhalaDbResult<Vec<u8>>
     where
         T: serde::Serialize,

@@ -1,9 +1,9 @@
 #[cfg(test)]
 use crate::core::FixtureGen;
-use crate::dec::Dec;
 use crate::{
     config::DatabaseOptions,
     core::{DataEntrySz, DataPtr, VlogNum},
+    dec::Dec,
     error::{GhalaDBError, GhalaDbResult},
     utils::t,
 };

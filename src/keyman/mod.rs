@@ -1,11 +1,14 @@
-//! Storage System Manager
-
 use crate::{
-    core::{Bytes, KeyRef, MemTable, ValueEntry},
+    config::DatabaseOptions,
+    core::{Bytes, DataPtr, KeyRef, ValueEntry},
     error::{GhalaDBError, GhalaDbResult},
-    sstable::{SSTable, SSTableIter, SSTableWriter},
+    keyman::sstable::{SSTable, SSTableIter, SSTableWriter},
+    memtable::{BTreeMemTable, MemTable},
+    utils::t,
 };
+use contracts::*;
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashSet, VecDeque},
     fs::OpenOptions,
     io::{BufReader, BufWriter},
@@ -17,27 +20,120 @@ use std::{
 };
 use tap::tap::Tap;
 
+mod sstable;
+
+#[derive(Debug)]
+pub(crate) struct KeyMan {
+    mem: BTreeMemTable,
+    ssm: StoreSysMan,
+    conf: DatabaseOptions,
+}
+
+impl KeyMan {
+    pub fn new(path: &Path, conf: DatabaseOptions) -> GhalaDbResult<KeyMan> {
+        let ssm = StoreSysMan::new(path, 10, conf.clone())?;
+        let mem = BTreeMemTable::new();
+        Ok(Self { mem, ssm, conf })
+    }
+
+    pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<DataPtr>> {
+        if let Some(entry) = self.mem.get(key) {
+            match entry {
+                ValueEntry::Tombstone => Ok(None),
+                ValueEntry::Val(dp) => Ok(Some(dp)),
+            }
+        } else {
+            self.ssm.get(key)
+        }
+    }
+
+    pub fn get_ve(&mut self, key: KeyRef) -> GhalaDbResult<ValueEntry> {
+        if let Some(entry) = self.mem.get(key) {
+            Ok(entry)
+        } else {
+            self.ssm.get_ve(key)
+        }
+    }
+
+    pub fn delete(&mut self, key: Bytes) -> GhalaDbResult<()> {
+        self.mem.delete(key);
+        Ok(())
+    }
+
+    pub fn put(&mut self, key: Bytes, val: DataPtr) -> GhalaDbResult<()> {
+        if self.mem_at_capacity(key.len() + val.mem_sz()) {
+            self.flush_mem()?;
+        }
+        self.mem.insert(key, val);
+        Ok(())
+    }
+    pub fn iter(
+        &self,
+    ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>>
+    {
+        let mem_iter = self.mem.iter();
+        let ssm_iter = self.ssm.iter()?;
+        let merged = merge_iter(mem_iter, ssm_iter);
+        Ok(Box::new(merged))
+    }
+    /// Attempts to sync in-memory data to disk.
+    pub fn sync(&mut self) -> GhalaDbResult<()> {
+        t!("keyman::flush_mem", self.flush_mem())?;
+        t!("ssm::sync", self.ssm.sync())?;
+        Ok(())
+    }
+
+    #[debug_ensures(self.mem.is_empty())]
+    fn flush_mem(&mut self) -> GhalaDbResult<()> {
+        if self.mem.is_empty() {
+            warn!("got empty memtable to flush.");
+            return Ok(());
+        }
+        debug!("flushing mem table");
+
+        let mut mem_table = BTreeMemTable::new();
+        std::mem::swap(&mut self.mem, &mut mem_table);
+        let path = self.ssm.flush_mem_table(mem_table, &self.conf)?;
+        debug!("flushed mem table to: {:?}", path);
+
+        Ok(())
+    }
+    fn mem_at_capacity(&self, kv_size: usize) -> bool {
+        if self.mem.is_empty() {
+            return false;
+        }
+        self.mem.mem_size() + kv_size > self.conf.max_mem_table_size
+    }
+}
+impl Drop for KeyMan {
+    fn drop(&mut self) {
+        t!("keyman::sync", self.sync()).ok();
+    }
+}
 type LevelsOnDisk = BTreeMap<usize, Vec<PathBuf>>;
 type Levels = BTreeMap<usize, VecDeque<SSTable>>;
-type SequenceNumber = u64;
+type SeqNum = u64;
 struct CompactionResult {
     level: usize,
     sst: SSTable,
-    seq_nums: HashSet<SequenceNumber>,
+    seq_nums: HashSet<SeqNum>,
 }
 
+#[derive(Debug)]
 pub(crate) struct StoreSysMan {
     base_path: PathBuf,
     max_tables: usize,
-    sequence: SequenceNumber,
+    sequence: SeqNum,
     rx: Option<Receiver<CompactionResult>>,
     levels: Levels,
+    conf: DatabaseOptions,
 }
 
 impl StoreSysMan {
     pub fn new<P: AsRef<Path>>(
         path: P,
         max_tables: usize,
+        conf: DatabaseOptions,
     ) -> GhalaDbResult<StoreSysMan> {
         let base_path = path.as_ref().to_path_buf();
 
@@ -69,10 +165,11 @@ impl StoreSysMan {
             sequence,
             rx: None,
             levels,
+            conf,
         })
     }
 
-    pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<Bytes>> {
+    pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<DataPtr>> {
         for (level, ssts) in self.levels.iter_mut() {
             trace!("checking for key in level: {}", level);
             for sst in ssts.iter_mut() {
@@ -89,19 +186,29 @@ impl StoreSysMan {
 
         Ok(None)
     }
+    pub fn get_ve(&mut self, key: KeyRef) -> GhalaDbResult<ValueEntry> {
+        for (_level, ssts) in self.levels.iter_mut() {
+            for sst in ssts.iter_mut() {
+                if let Some(val) = sst.get(key)? {
+                    return Ok(val);
+                }
+            }
+        }
+        Err(GhalaDBError::MissingValueEntry(key.to_vec()))
+    }
 
-    fn build_sst_path(&mut self) -> GhalaDbResult<(SequenceNumber, PathBuf)> {
+    fn build_sst_path(&mut self) -> GhalaDbResult<(SeqNum, PathBuf)> {
         self.sequence += 1;
         let sst_name = format!("{}.sst", self.sequence);
         Ok((self.sequence, self.base_path.join(sst_name)))
     }
 
+    #[debug_requires(!table.is_empty(), "cannot flush empty mem table")]
     pub fn flush_mem_table(
         &mut self,
         table: impl MemTable,
+        conf: &DatabaseOptions,
     ) -> GhalaDbResult<PathBuf> {
-        debug_assert!(!table.is_empty(), "cannot flush empty mem table");
-
         let (seq_num, sst_path) = self.build_sst_path()?;
         debug_assert!(
             !sst_path.exists(),
@@ -109,20 +216,16 @@ impl StoreSysMan {
             sst_path.display()
         );
         debug!(
-            "flushig mem table with sequence: {} to {}",
+            "flushing mem table with sequence: {} to {}",
             seq_num,
             sst_path.display()
         );
-        let mut wtr = SSTableWriter::new(&sst_path, seq_num)?;
+        let mut wtr = SSTableWriter::new(&sst_path, seq_num, conf.compress)?;
         for entry in table.into_iter() {
             let (k, v) = entry?;
             wtr.write(k.to_vec(), v.clone())?;
         }
-        let sst = wtr.into_sstable().map_err(|e| {
-            debug!("got error when writing sst: {:#?}", e);
-            e
-        })?;
-        trace!("got sst: {:?}", sst);
+        let sst = t!("SSTableWriter::into_sstable", wtr.into_sstable())?;
         let ssts = self.levels.entry(0usize).or_default();
         ssts.push_front(sst);
 
@@ -148,9 +251,18 @@ impl StoreSysMan {
                 ssts_to_compact.push(sst.iter()?);
                 seq_nums.insert(sst.seq_num);
             }
+            let conf = self.conf.clone();
             thread::spawn(move || {
-                Self::compact(lvl, ssts_to_compact, seq_nums, tx, sst_path, seq_num)
-                    .tap(|r| debug!("compaction result: {:?}", r))
+                Self::compact(
+                    lvl,
+                    ssts_to_compact,
+                    seq_nums,
+                    tx,
+                    sst_path,
+                    seq_num,
+                    conf,
+                )
+                .tap(|r| debug!("compaction result: {:?}", r))
             });
             self.rx = Some(rx);
         }
@@ -180,6 +292,17 @@ impl StoreSysMan {
 
         Ok(accum)
     }
+
+    pub fn sync(&mut self) -> GhalaDbResult<()> {
+        debug!("checking pending compaction before shutdown");
+        while self.rx.is_some() {
+            self.handle_compaction()?;
+        }
+        debug!("persisting levels info on disk");
+        self.dump_levels_info()?;
+        Ok(())
+    }
+
     fn handle_compaction(&mut self) -> GhalaDbResult<()> {
         if let Some(ref rx) = self.rx {
             match rx.recv_timeout(Duration::from_millis(100)) {
@@ -239,7 +362,7 @@ impl StoreSysMan {
         let old = old.iter()?;
         let merged = merge_iter(new, old);
 
-        let mut sst_wtr = SSTableWriter::new(&sst_path, seq_num)?;
+        let mut sst_wtr = SSTableWriter::new(&sst_path, seq_num, true)?;
         for entry in merged {
             let (k, v) = entry?;
             sst_wtr.write(k.to_vec(), v.clone())?;
@@ -251,10 +374,11 @@ impl StoreSysMan {
     fn compact(
         level: usize,
         ssts: Vec<SSTableIter>,
-        seq_nums: HashSet<SequenceNumber>,
+        seq_nums: HashSet<SeqNum>,
         tx: Sender<CompactionResult>,
         path: PathBuf,
         seq_num: u64,
+        conf: DatabaseOptions,
     ) -> GhalaDbResult<()> {
         let mut merged: Box<
             dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>,
@@ -263,7 +387,7 @@ impl StoreSysMan {
             let inter = merge_iter(merged, sst);
             merged = Box::new(inter);
         }
-        let mut sst_wtr = SSTableWriter::new(&path, seq_num)?;
+        let mut sst_wtr = SSTableWriter::new(&path, seq_num, conf.compress)?;
         for entry in merged {
             let (k, v) = entry?;
             sst_wtr.write(k.to_vec(), v.clone())?;
@@ -313,12 +437,7 @@ impl StoreSysMan {
 
 impl Drop for StoreSysMan {
     fn drop(&mut self) {
-        debug!("checking pending compaction before shutdown");
-        while self.rx.is_some() {
-            self.handle_compaction().ok();
-        }
-        debug!("persisting levels info on disk");
-        self.dump_levels_info().ok();
+        t!("ssm::drop", self.sync()).ok();
     }
 }
 
@@ -345,73 +464,69 @@ where
     rhs: Peekable<J>,
 }
 
-impl<I: Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>, J> Iterator
-    for MergeSorted<I, J>
+impl<I, J> Iterator for MergeSorted<I, J>
 where
+    I: Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>,
     J: Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>,
 {
     type Item = GhalaDbResult<(Bytes, ValueEntry)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match (self.lhs.peek(), self.rhs.peek()) {
-            (Some(&Err(_)), _) => self.lhs.next(),
-            (_, Some(&Err(_))) => self.rhs.next(),
-            (Some(Ok(ref l)), Some(Ok(ref r))) if l.0 == r.0 => {
-                _ = self.rhs.next();
-                self.lhs.next()
-            }
-            (Some(Ok(ref l)), Some(Ok(ref r))) if l.0 < r.0 => self.lhs.next(),
-            (Some(&Ok(_)), Some(&Ok(_))) => self.rhs.next(),
-            (Some(&Ok(_)), None) => self.lhs.next(),
-            (None, Some(&Ok(_))) => self.rhs.next(),
-            (None, None) => None,
+        // handle errors
+        if let Some(&Err(_)) = self.lhs.peek() {
+            return self.lhs.next();
         }
+        if let Some(&Err(_)) = self.rhs.peek() {
+            return self.rhs.next();
+        }
+        // handle ordering - return smallest first
+        if let (Some(Ok(ref l)), Some(Ok(ref r))) =
+            (self.lhs.peek(), self.rhs.peek())
+        {
+            match l.0.cmp(&r.0) {
+                Ordering::Equal => {
+                    // discard old value
+                    self.rhs.next();
+                    return self.lhs.next();
+                }
+                Ordering::Less => return self.lhs.next(),
+                Ordering::Greater => return self.rhs.next(),
+            }
+        }
+        // handle remainders
+        if let Some(&Ok(_)) = self.lhs.peek() {
+            return self.lhs.next();
+        }
+        if let Some(&Ok(_)) = self.rhs.peek() {
+            return self.rhs.next();
+        }
+        // base case
+        None
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memtable::BTreeMemTable;
-    use rand::{
-        distributions::{Alphanumeric, DistString},
-        prelude::ThreadRng,
-        thread_rng,
-    };
-    use tempdir::TempDir;
-    fn gen_string(rng: &mut ThreadRng, len: usize) -> String {
-        Alphanumeric {}.sample_string(rng, len)
-    }
-
-    fn gen_tmp_dir() -> GhalaDbResult<TempDir> {
-        let mut rng = thread_rng();
-        Ok(TempDir::new(&gen_string(&mut rng, 16))?)
-    }
-
-    fn dummy_vals() -> Vec<(Bytes, Bytes)> {
-        let vals = [
-            "Mike Tyson",
-            "Deontay Wilder",
-            "Anthony Joshua",
-            "Muhammad Ali",
-            "Vladimir Klitschko",
-        ];
-        vals.iter().map(|b| ((*b).into(), (*b).into())).collect()
-    }
+    use crate::core::FixtureGen;
+    use tempfile::tempdir;
 
     #[test]
-    fn sst_serde() -> GhalaDbResult<()> {
-        let tmp_dir = gen_tmp_dir()?;
-        let mut mt = BTreeMemTable::new();
-        for (k, v) in dummy_vals() {
-            mt.insert(k, v)
+    fn read_after_compaction() -> GhalaDbResult<()> {
+        env_logger::try_init().ok();
+        let tmp_dir = tempdir()?;
+        let opts = DatabaseOptions::builder().max_mem_table_size(1000).build();
+        let mut kman = KeyMan::new(tmp_dir.path(), opts.clone())?;
+        let data: Vec<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
+        for k in &data {
+            let dp = DataPtr::new(0, k.len() as u64, k.len() as u32, false);
+            kman.put(k.clone(), dp)?;
         }
-        mt.delete("Tyson Fury".as_bytes().to_vec());
-
-        let mut ssm = StoreSysMan::new(tmp_dir.path(), 1)?;
-        let sst_path = ssm.flush_mem_table(mt.clone())?;
-        let loaded_sst = SSTable::from_path(sst_path)?;
-        let mt2 = loaded_sst.as_memtable()?;
-        assert_eq!(mt, mt2);
+        drop(kman);
+        let mut kman = KeyMan::new(tmp_dir.path(), opts)?;
+        for k in &data {
+            assert!(kman.get(k)?.is_some());
+        }
         Ok(())
     }
 }

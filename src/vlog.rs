@@ -21,12 +21,6 @@ const VLOG_INFO_FILE: &str = "vlog_info";
 
 pub type Bytes = Vec<u8>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ValEntry {
-    Tombstone,
-    Value(Bytes),
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DataEntry {
     pub key: Bytes,

@@ -2,7 +2,7 @@ use crate::{
     config::DatabaseOptions,
     core::{Bytes, DataPtr, KeyRef, ValueEntry},
     error::{GhalaDBError, GhalaDbResult},
-    keyman::sstable::{SSTable, SSTableIter, SSTableWriter},
+    keyman::sstable::{SSTable, SSTableWriter},
     memtable::{BTreeMemTable, MemTable},
     utils::t,
 };
@@ -14,13 +14,19 @@ use std::{
     io::{BufReader, BufWriter},
     iter::Peekable,
     path::{Path, PathBuf},
-    sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender},
+    sync::mpsc::{channel, Receiver, RecvTimeoutError},
     thread,
     time::Duration,
 };
-use tap::tap::Tap;
 
+use self::compactor::{CompactionResult, Compactor, CompactorMsg};
+
+mod compactor;
 mod sstable;
+
+type LevelsOnDisk = BTreeMap<usize, Vec<PathBuf>>;
+type Levels = BTreeMap<usize, VecDeque<SSTable>>;
+type SeqNum = u64;
 
 #[derive(Debug)]
 pub(crate) struct KeyMan {
@@ -110,21 +116,13 @@ impl Drop for KeyMan {
         t!("keyman::sync", self.sync()).ok();
     }
 }
-type LevelsOnDisk = BTreeMap<usize, Vec<PathBuf>>;
-type Levels = BTreeMap<usize, VecDeque<SSTable>>;
-type SeqNum = u64;
-struct CompactionResult {
-    level: usize,
-    sst: SSTable,
-    seq_nums: HashSet<SeqNum>,
-}
 
 #[derive(Debug)]
 pub(crate) struct StoreSysMan {
     base_path: PathBuf,
     max_tables: usize,
     sequence: SeqNum,
-    rx: Option<Receiver<CompactionResult>>,
+    rx: Option<Receiver<CompactorMsg>>,
     levels: Levels,
     conf: DatabaseOptions,
 }
@@ -253,16 +251,9 @@ impl StoreSysMan {
             }
             let conf = self.conf.clone();
             thread::spawn(move || {
-                Self::compact(
-                    lvl,
-                    ssts_to_compact,
-                    seq_nums,
-                    tx,
-                    sst_path,
-                    seq_num,
-                    conf,
-                )
-                .tap(|r| debug!("compaction result: {:?}", r))
+                let compactor =
+                    Compactor::new(sst_path, lvl, seq_nums, seq_num, conf);
+                t!("Compactor::compact", compactor.compact(ssts_to_compact, tx))
             });
             self.rx = Some(rx);
         }
@@ -318,31 +309,37 @@ impl StoreSysMan {
                         Ok(())
                     }
                 },
-                Ok(CompactionResult {
-                    level,
-                    sst,
-                    seq_nums,
-                }) => {
-                    debug!("got result from compaction thread");
-                    trace!(
-                        "adding sst at {} to level {}",
-                        sst.path.display(),
-                        level + 1
-                    );
-                    self.levels.entry(level + 1).or_default().push_front(sst);
-                    self.levels.entry(level).or_default().retain_mut(|t| {
-                        if seq_nums.contains(&t.seq_num) {
-                            t.deactivate();
-                            debug!("deactivated sst: {}", t.path.display());
-                            false
-                        } else {
-                            true
-                        }
-                    });
+                Ok(compactor_message) => match compactor_message {
+                    CompactorMsg::Ok(CompactionResult {
+                        level,
+                        sst,
+                        seq_nums,
+                    }) => {
+                        debug!("got result from compaction thread");
+                        trace!(
+                            "adding sst at {} to level {}",
+                            sst.path.display(),
+                            level + 1
+                        );
+                        self.levels.entry(level + 1).or_default().push_front(sst);
+                        self.levels.entry(level).or_default().retain_mut(|t| {
+                            if seq_nums.contains(&t.seq_num) {
+                                t.deactivate();
+                                debug!("deactivated sst: {}", t.path.display());
+                                false
+                            } else {
+                                true
+                            }
+                        });
 
-                    self.rx = None;
-                    Ok(())
-                }
+                        self.rx = None;
+                        Ok(())
+                    }
+                    CompactorMsg::Error(err) => {
+                        error!("compaction failed. Reason: {:?}", err);
+                        Err(err)
+                    }
+                },
             }
         } else {
             Ok(())
@@ -370,44 +367,6 @@ impl StoreSysMan {
         let sst = sst_wtr.into_sstable()?;
 
         Ok(sst)
-    }
-    fn compact(
-        level: usize,
-        ssts: Vec<SSTableIter>,
-        seq_nums: HashSet<SeqNum>,
-        tx: Sender<CompactionResult>,
-        path: PathBuf,
-        seq_num: u64,
-        conf: DatabaseOptions,
-    ) -> GhalaDbResult<()> {
-        let mut merged: Box<
-            dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>,
-        > = Box::new(vec![].into_iter());
-        for sst in ssts {
-            let inter = merge_iter(merged, sst);
-            merged = Box::new(inter);
-        }
-        let mut sst_wtr = SSTableWriter::new(&path, seq_num, conf.compress)?;
-        for entry in merged {
-            let (k, v) = entry?;
-            sst_wtr.write(k.to_vec(), v.clone())?;
-        }
-        let sst = sst_wtr.into_sstable()?;
-
-        debug!(
-            "compacted ssts to {}. Total bytes: {}",
-            path.display(),
-            sst.mem_size()
-        );
-
-        tx.send(CompactionResult {
-            level,
-            sst,
-            seq_nums,
-        })
-        .map_err(|e| GhalaDBError::SstSendError(e.to_string()))?;
-
-        Ok(())
     }
 
     fn load_levels_info<P: AsRef<Path>>(path: P) -> GhalaDbResult<LevelsOnDisk> {

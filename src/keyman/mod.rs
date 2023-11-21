@@ -75,9 +75,9 @@ impl KeyMan {
     }
     pub fn iter(
         &self,
-    ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>>
+    ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>> + '_>
     {
-        let mem_iter = self.mem.iter();
+        let mem_iter = self.mem.iter().map(|(k, v)| Ok((k.clone(), v.clone())));
         let ssm_iter = self.ssm.iter()?;
         let merged = merge_iter(mem_iter, ssm_iter);
         Ok(Box::new(merged))
@@ -220,8 +220,8 @@ impl StoreSysMan {
         );
         let mut wtr = SSTableWriter::new(&sst_path, seq_num, conf.compress)?;
         for entry in table.into_iter() {
-            let (k, v) = entry?;
-            wtr.write(k.to_vec(), v.clone())?;
+            let (k, v) = entry;
+            wtr.write(k, v)?;
         }
         let sst = t!("SSTableWriter::into_sstable", wtr.into_sstable())?;
         let ssts = self.levels.entry(0usize).or_default();

@@ -1,6 +1,8 @@
-use crate::core::MemSize;
-use crate::error::GhalaDbResult;
-use std::collections::{btree_map::IntoIter, BTreeMap};
+use crate::{core::MemSize, error::GhalaDbResult};
+use std::collections::{
+    btree_map::{IntoIter, Iter},
+    BTreeMap,
+};
 
 pub(crate) trait MemTable<K, V> {
     fn contains(&self, key: &K) -> bool;
@@ -9,8 +11,8 @@ pub(crate) trait MemTable<K, V> {
     fn insert(&mut self, key: K, val: V);
     fn len(&self) -> usize;
     fn mem_size(&self) -> usize;
-    fn iter(&self) -> Box<dyn Iterator<Item = GhalaDbResult<(K, V)>>>;
-    fn into_iter(self) -> Box<dyn Iterator<Item = GhalaDbResult<(K, V)>>>;
+    fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_>;
+    fn into_iter(self) -> Box<dyn Iterator<Item = (K, V)>>;
     fn is_empty(&self) -> bool;
 }
 pub(crate) struct MemTableIter<K, V> {
@@ -24,24 +26,13 @@ impl<K, V> Iterator for MemTableIter<K, V> {
         self.iter.next().map(Ok)
     }
 }
-//TODO make table generic over key and val
-// to make refactor easier
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) struct BTreeMemTable<K, V>
-where
-    K: Clone,
-    V: Clone,
-{
-    //pub map: BTreeMap<Bytes, ValueEntry>,
+pub(crate) struct BTreeMemTable<K, V> {
     pub map: BTreeMap<K, V>,
     mem_size: usize,
 }
 
-impl<K, V> BTreeMemTable<K, V>
-where
-    K: Clone,
-    V: Clone,
-{
+impl<K, V> BTreeMemTable<K, V> {
     pub fn new() -> BTreeMemTable<K, V> {
         BTreeMemTable {
             map: BTreeMap::new(),
@@ -57,16 +48,15 @@ where
         self.map.into_iter()
     }
 
-    fn iter(&self) -> IntoIter<K, V> {
-        //TODO: avoid cloning
-        self.map.clone().into_iter()
+    fn iter(&self) -> Iter<K, V> {
+        self.map.iter()
     }
 }
 
-impl<
-        K: Clone + Ord + MemSize + AsRef<K> + 'static,
-        V: Clone + Default + MemSize + 'static,
-    > MemTable<K, V> for BTreeMemTable<K, V>
+impl<K, V> MemTable<K, V> for BTreeMemTable<K, V>
+where
+    K: Clone + Ord + MemSize + AsRef<K> + 'static,
+    V: Clone + Default + MemSize + 'static,
 {
     fn contains(&self, key: &K) -> bool {
         self.map.contains_key(key)
@@ -103,18 +93,12 @@ impl<
         self.mem_size()
     }
 
-    fn into_iter(self) -> Box<dyn Iterator<Item = GhalaDbResult<(K, V)>>> {
-        let it = MemTableIter {
-            iter: Box::new(self.into_iter()),
-        };
-        Box::new(it)
+    fn into_iter(self) -> Box<dyn Iterator<Item = (K, V)>> {
+        Box::new(self.into_iter())
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = GhalaDbResult<(K, V)>>> {
-        let it = MemTableIter {
-            iter: Box::new(self.iter()),
-        };
-        Box::new(it)
+    fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_> {
+        Box::new(self.iter())
     }
 
     fn is_empty(&self) -> bool {

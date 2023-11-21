@@ -76,11 +76,12 @@ impl GhalaDB {
     }
 
     pub fn iter(
-        self,
-    ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, Bytes)>>> {
+        &mut self,
+    ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, Bytes)>> + '_>
+    {
         let db_iter: GhalaDBIter = GhalaDBIter {
             iter: Box::new(self.keyman.iter()?),
-            valman: self.vlogs_man,
+            valman: &mut self.vlogs_man,
         };
 
         Ok(db_iter.into_iter())
@@ -133,12 +134,12 @@ impl GhalaDB {
     }
 }
 
-pub struct GhalaDBIter {
-    iter: Box<dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>>>,
-    valman: VlogsMan,
+pub struct GhalaDBIter<'a> {
+    iter: Box<dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>> + 'a>,
+    valman: &'a mut VlogsMan,
 }
 
-impl Iterator for GhalaDBIter {
+impl Iterator for GhalaDBIter<'_> {
     type Item = GhalaDbResult<(Bytes, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -150,7 +151,7 @@ impl Iterator for GhalaDBIter {
     }
 }
 
-impl GhalaDBIter {
+impl GhalaDBIter<'_> {
     fn nxt(&mut self) -> GhalaDbResult<Option<(Bytes, Bytes)>> {
         loop {
             if let Some(kv) = self.iter.next() {
@@ -168,15 +169,6 @@ impl GhalaDBIter {
         }
     }
 }
-
-//impl IntoIterator for GhalaDB {
-//    type Item = (String, String);
-//    type IntoIter = IntoIter<String, String>;
-//
-//    fn into_iter(self) -> Self::IntoIter {
-//        self.mem.into_iter()
-//    }
-//}
 
 #[cfg(test)]
 mod tests {

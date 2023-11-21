@@ -8,10 +8,32 @@ pub type KeyRef<'a> = &'a [u8];
 pub type VlogNum = u64;
 pub type DataEntrySz = u32;
 
+pub(crate) trait MemSize {
+    fn mem_sz(&self) -> usize;
+}
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ValueEntry {
     Tombstone,
     Val(DataPtr),
+}
+impl Default for ValueEntry {
+    fn default() -> Self {
+        Self::Tombstone
+    }
+}
+impl MemSize for ValueEntry {
+    fn mem_sz(&self) -> usize {
+        match self {
+            Self::Val(dp) => dp.mem_sz(),
+            Self::Tombstone => 0usize,
+        }
+    }
+}
+
+impl MemSize for Bytes {
+    fn mem_sz(&self) -> usize {
+        self.len()
+    }
 }
 
 #[derive(

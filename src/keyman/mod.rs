@@ -30,7 +30,7 @@ type SeqNum = u64;
 
 #[derive(Debug)]
 pub(crate) struct KeyMan {
-    mem: BTreeMemTable,
+    mem: BTreeMemTable<Bytes, ValueEntry>,
     ssm: StoreSysMan,
     conf: DatabaseOptions,
 }
@@ -42,7 +42,7 @@ impl KeyMan {
         Ok(Self { mem, ssm, conf })
     }
 
-    pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<DataPtr>> {
+    pub fn get(&mut self, key: &Bytes) -> GhalaDbResult<Option<DataPtr>> {
         if let Some(entry) = self.mem.get(key) {
             match entry {
                 ValueEntry::Tombstone => Ok(None),
@@ -53,7 +53,7 @@ impl KeyMan {
         }
     }
 
-    pub fn get_ve(&mut self, key: KeyRef) -> GhalaDbResult<ValueEntry> {
+    pub fn get_ve(&mut self, key: &Bytes) -> GhalaDbResult<ValueEntry> {
         if let Some(entry) = self.mem.get(key) {
             Ok(entry)
         } else {
@@ -70,7 +70,7 @@ impl KeyMan {
         if self.mem_at_capacity(key.len() + val.mem_sz()) {
             self.flush_mem()?;
         }
-        self.mem.insert(key, val);
+        self.mem.insert(key, ValueEntry::Val(val));
         Ok(())
     }
     pub fn iter(
@@ -204,7 +204,7 @@ impl StoreSysMan {
     #[debug_requires(!table.is_empty(), "cannot flush empty mem table")]
     pub fn flush_mem_table(
         &mut self,
-        table: impl MemTable,
+        table: impl MemTable<Bytes, ValueEntry>,
         conf: &DatabaseOptions,
     ) -> GhalaDbResult<PathBuf> {
         let (seq_num, sst_path) = self.build_sst_path()?;

@@ -34,8 +34,6 @@ pub enum GhalaDBError {
     MissingVlog(VlogNum),
     #[error("{0}")]
     VlogReadError(String),
-    #[error("Missing value entry for key: {0:?}")]
-    MissingValueEntry(Vec<u8>),
     #[error(transparent)]
     DataCompressionError(#[from] snap::Error),
 }

@@ -102,7 +102,7 @@ impl GhalaDB {
         }
         self.gc_on = true;
         if let Some(ref mut jan) = self.janitor {
-            if let Some(de) = jan.step(&mut self.keys)? {
+            if let Some(de) = jan.sweep(&mut self.keys)? {
                 t!("gc::put", self.put(de.key, de.val))?;
             } else {
                 t!("vlogs_man::drop_vlog", self.vlogs_man.drop_vlog(jan.vnum()))?;

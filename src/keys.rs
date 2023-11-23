@@ -2,7 +2,7 @@ use crate::{
     config::DatabaseOptions,
     core::{Bytes, DataPtr, KeyRef, ValueEntry},
     dec::Dec,
-    error::{GhalaDBError, GhalaDbResult},
+    error::GhalaDbResult,
     utils::t,
 };
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Sorted Keys Table
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct Skt {
     map: BTreeMap<Bytes, ValueEntry>,
@@ -56,14 +57,6 @@ impl Skt {
             ValueEntry::Val(dp) => Some(*dp),
             ValueEntry::Tombstone => None,
         })
-    }
-
-    pub fn get_ve(&mut self, key: KeyRef) -> GhalaDbResult<ValueEntry> {
-        if let Some(ve) = self.map.get(key) {
-            Ok(*ve)
-        } else {
-            Err(GhalaDBError::MissingValueEntry(key.to_vec()))
-        }
     }
 
     pub fn put(&mut self, k: Bytes, v: ValueEntry) -> GhalaDbResult<()> {

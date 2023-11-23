@@ -7,7 +7,6 @@ use crate::{
     error::{GhalaDBError, GhalaDbResult},
     utils::t,
 };
-#[allow(unused_imports)]
 use contracts::*;
 use serde::{Deserialize, Serialize};
 use std::{

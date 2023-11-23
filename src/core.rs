@@ -11,7 +11,7 @@ pub type DataEntrySz = u32;
 pub(crate) trait MemSize {
     fn mem_sz(&self) -> usize;
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ValueEntry {
     Tombstone,
     Val(DataPtr),

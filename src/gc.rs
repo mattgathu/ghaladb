@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::{
     core::{ValueEntry, VlogNum},
     error::GhalaDbResult,
-    keyman::KeyMan,
+    keys::Skt,
     utils::t,
     vlog::{DataEntry, VlogIter},
 };
@@ -20,12 +20,12 @@ impl Janitor {
         Ok(Self { vnum, vlog_iter })
     }
 
-    pub fn step(&mut self, keyman: &mut KeyMan) -> GhalaDbResult<Option<DataEntry>> {
+    pub fn step(&mut self, keys: &mut Skt) -> GhalaDbResult<Option<DataEntry>> {
         loop {
             match self.vlog_iter.next_entry()? {
                 None => return Ok(None),
                 Some((dp, de)) => {
-                    let ve = t!("keyman::get_ve", keyman.get_ve(&de.key))?;
+                    let ve = t!("keys::get_ve", keys.get_ve(&de.key))?;
                     match ve {
                         ValueEntry::Tombstone => continue,
                         ValueEntry::Val(cur_dp) => {

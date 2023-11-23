@@ -211,7 +211,6 @@ impl Vlog {
         Ok(dp)
     }
 
-    #[cfg(debug_assertions)]
     fn buf_entries_sorted(&self) -> bool {
         // check buf entries as sorted by dp offset
         let mut prev = None;
@@ -227,7 +226,6 @@ impl Vlog {
         true
     }
 
-    #[cfg(debug_assertions)]
     fn buf_has_dp(&self, dp: &DataPtr) -> bool {
         self.buf.binary_search_by_key(dp, |(odp, _)| *odp).is_ok()
     }

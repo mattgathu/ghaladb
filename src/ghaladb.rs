@@ -3,7 +3,7 @@ use crate::{
     core::{Bytes, ValueEntry},
     error::{GhalaDBError, GhalaDbResult},
     gc::Janitor,
-    keyman::KeyMan,
+    keys::Skt,
     utils::t,
     vlog::{DataEntry, VlogsMan},
 };
@@ -19,7 +19,7 @@ use std::path::Path;
 /// ///  _|_|
 /// ///
 pub struct GhalaDB {
-    keyman: KeyMan,
+    keys: Skt,
     vlogs_man: VlogsMan,
     janitor: Option<Janitor>,
     opts: DatabaseOptions,
@@ -36,12 +36,13 @@ impl GhalaDB {
         let db_options =
             options.unwrap_or_else(|| DatabaseOptions::builder().build());
         Self::init_dir(path.as_ref())?;
+        let skt_path = path.as_ref().join("skt");
 
         let vlogs_man = VlogsMan::new(path.as_ref(), db_options.clone())?;
-        let keyman = KeyMan::new(path.as_ref(), db_options.clone())?;
+        let keys = Skt::from_path(skt_path, db_options.clone())?;
         let janitor = None;
         let db = GhalaDB {
-            keyman,
+            keys,
             vlogs_man,
             janitor,
             opts: db_options,
@@ -50,14 +51,15 @@ impl GhalaDB {
         Ok(db)
     }
 
+    //TODO: take keyref
     pub fn delete(&mut self, key: Bytes) -> GhalaDbResult<()> {
         trace!("deleting: {:?}", key);
-        t!("keyman::del", self.keyman.delete(key))?;
+        t!("keys::del", self.keys.delete(&key))?;
         Ok(())
     }
 
     pub fn get(&mut self, key: &Bytes) -> GhalaDbResult<Option<Bytes>> {
-        if let Some(dp) = t!("keyman::get", self.keyman.get(key))? {
+        if let Some(dp) = self.keys.get(key) {
             let bytes = t!("vlogman::get", self.vlogs_man.get(&dp))?.val;
             Ok(Some(bytes))
         } else {
@@ -69,7 +71,7 @@ impl GhalaDB {
         trace!("updating: {key:?}");
         let de = DataEntry::new(key.clone(), val);
         let dp = t!("vlogman::put", self.vlogs_man.put(&de))?;
-        t!("keyman::put", self.keyman.put(key, dp))?;
+        t!("keys::put", self.keys.put(key, ValueEntry::Val(dp)))?;
         t!("gc", self.gc())?;
 
         Ok(())
@@ -80,7 +82,7 @@ impl GhalaDB {
     ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(Bytes, Bytes)>> + '_>
     {
         let db_iter: GhalaDBIter = GhalaDBIter {
-            iter: Box::new(self.keyman.iter()?),
+            iter: Box::new(self.keys.iter()),
             valman: &mut self.vlogs_man,
         };
 
@@ -89,7 +91,7 @@ impl GhalaDB {
 
     /// Attempts to sync all data to disk.
     pub fn sync(&mut self) -> GhalaDbResult<()> {
-        self.keyman.sync()?;
+        self.keys.sync()?;
         self.vlogs_man.sync()?;
         Ok(())
     }
@@ -100,7 +102,7 @@ impl GhalaDB {
         }
         self.gc_on = true;
         if let Some(ref mut jan) = self.janitor {
-            if let Some(de) = jan.step(&mut self.keyman)? {
+            if let Some(de) = jan.step(&mut self.keys)? {
                 t!("gc::put", self.put(de.key, de.val))?;
             } else {
                 t!("vlogs_man::drop_vlog", self.vlogs_man.drop_vlog(jan.vnum()))?;

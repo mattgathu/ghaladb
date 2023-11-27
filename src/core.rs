@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use bincode::{Decode, Encode};
 
 #[cfg(test)]
 use rand::{distributions::Standard, thread_rng, Rng};
@@ -11,7 +11,7 @@ pub type DataEntrySz = u32;
 pub(crate) trait MemSize {
     fn mem_sz(&self) -> usize;
 }
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Encode, Decode)]
 pub(crate) enum ValueEntry {
     Tombstone,
     Val(DataPtr),
@@ -37,7 +37,7 @@ impl MemSize for Bytes {
 }
 
 #[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Hash, PartialOrd, Ord, Eq,
+    Debug, Clone, Copy, Encode, Decode, PartialEq, Hash, PartialOrd, Ord, Eq,
 )]
 pub struct DataPtr {
     pub vlog: VlogNum,

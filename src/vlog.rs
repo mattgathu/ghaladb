@@ -7,8 +7,8 @@ use crate::{
     error::{GhalaDBError, GhalaDbResult},
     utils::t,
 };
+use bincode::{Decode, Encode};
 use contracts::*;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
@@ -20,7 +20,7 @@ const VLOG_INFO_FILE: &str = "vlog_info";
 
 pub type Bytes = Vec<u8>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Encode, Decode, PartialEq)]
 pub struct DataEntry {
     pub key: Bytes,
     pub val: Bytes,
@@ -153,7 +153,6 @@ impl Vlog {
     fn put(&mut self, entry: &DataEntry) -> GhalaDbResult<DataPtr> {
         if self.conf.mem_buf_enabled {
             let dp = self.write_to_buf(entry)?;
-            debug_assert!(self.buf_has_dp(&dp));
             Ok(dp)
         } else {
             let dp = t!("vlog::write_entry", self.write_de(entry))?;
@@ -184,10 +183,12 @@ impl Vlog {
         Ok(())
     }
 
+    #[inline]
     fn ser(&mut self, de: &DataEntry) -> GhalaDbResult<Bytes> {
         self.dec.ser(de)
     }
 
+    #[inline]
     fn de(&mut self, buf: &[u8]) -> GhalaDbResult<DataEntry> {
         self.dec.deser(buf)
     }
@@ -210,8 +211,8 @@ impl Vlog {
         Ok(dp)
     }
 
+    /// check buf entries as sorted by dp offset
     fn buf_entries_sorted(&self) -> bool {
-        // check buf entries as sorted by dp offset
         let mut prev = None;
         for item in &self.buf {
             let cur = item.0.offset;
@@ -225,10 +226,6 @@ impl Vlog {
         true
     }
 
-    fn buf_has_dp(&self, dp: &DataPtr) -> bool {
-        self.buf.binary_search_by_key(dp, |(odp, _)| *odp).is_ok()
-    }
-
     #[debug_requires(!self.active, "cannot del active vlog")]
     #[debug_ensures(!self.path.exists())]
     fn delete(&self) -> GhalaDbResult<()> {
@@ -240,7 +237,6 @@ impl Vlog {
 impl Drop for Vlog {
     fn drop(&mut self) {
         if self.conf.mem_buf_enabled {
-            debug!("flushing mem buf");
             self.flush().ok();
             debug_assert!(self.buf.is_empty(), "buf not empty at drop");
         }
@@ -249,6 +245,8 @@ impl Drop for Vlog {
         }
     }
 }
+
+//TODO: Rename to VlogReader
 pub(crate) struct VlogIter {
     rdr: BufReader<File>,
     dec: Dec,
@@ -310,7 +308,7 @@ impl Iterator for VlogIter {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct VlogConfig {
     mem_buf_enabled: bool,
     mem_buf_size: usize,
@@ -321,11 +319,11 @@ impl From<&DatabaseOptions> for VlogConfig {
         Self {
             mem_buf_enabled: opts.vlog_mem_buf_enabled,
             mem_buf_size: opts.vlog_mem_buf_size,
-            compress: opts.compress,
+            compress: opts.compress_data,
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode)]
 struct VlogsInfo {
     vlogs: Vec<VlogNum>,
 }

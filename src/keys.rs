@@ -5,7 +5,7 @@ use crate::{
     error::GhalaDbResult,
     utils::t,
 };
-use serde::{Deserialize, Serialize};
+use bincode::{Decode, Encode};
 use std::{
     collections::BTreeMap,
     fmt::Debug,
@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Sorted Keys Table
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Encode, Decode, Debug)]
 pub(crate) struct Skt {
     map: BTreeMap<Bytes, ValueEntry>,
     path: PathBuf,

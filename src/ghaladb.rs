@@ -23,7 +23,7 @@ pub struct GhalaDB {
     vlogs_man: VlogsMan,
     janitor: Option<Janitor>,
     opts: DatabaseOptions,
-    gc_on: bool,
+    sweeping: bool,
 }
 
 impl GhalaDB {
@@ -46,7 +46,7 @@ impl GhalaDB {
             vlogs_man,
             janitor,
             opts: db_options,
-            gc_on: false,
+            sweeping: false,
         };
         Ok(db)
     }
@@ -97,10 +97,10 @@ impl GhalaDB {
     }
 
     fn gc(&mut self) -> GhalaDbResult<()> {
-        if !self.opts.vlog_compaction_enabled || self.gc_on {
+        if !self.opts.vlog_compaction_enabled || self.sweeping {
             return Ok(());
         }
-        self.gc_on = true;
+        self.sweeping = true;
         if let Some(ref mut jan) = self.janitor {
             if let Some(de) = jan.sweep(&mut self.keys)? {
                 t!("gc::put", self.put(de.key, de.val))?;
@@ -112,7 +112,7 @@ impl GhalaDB {
             let janitor = t!("janitor::new", Janitor::new(vnum, &path))?;
             self.janitor = Some(janitor);
         }
-        self.gc_on = false;
+        self.sweeping = false;
 
         Ok(())
     }
@@ -283,10 +283,7 @@ mod tests {
     fn sst_merges() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
-        let opts = DatabaseOptions::builder()
-            .max_mem_table_size(16)
-            .sync(false)
-            .build();
+        let opts = DatabaseOptions::builder().sync(false).build();
         let mut db = GhalaDB::new(tmp_dir.path(), Some(opts))?;
         for (k, v) in dummy_vals() {
             db.put(k, v)?;
@@ -304,7 +301,6 @@ mod tests {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
         let opts = DatabaseOptions::builder()
-            .max_mem_table_size(1024)
             .max_vlog_size(4 * 1024)
             .sync(false)
             .build();
@@ -326,7 +322,6 @@ mod tests {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
         let opts = DatabaseOptions::builder()
-            .max_mem_table_size(1000 * 1024)
             .max_vlog_size(10000 * 1024)
             .vlog_compaction_enabled(true)
             .sync(false)

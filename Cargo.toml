@@ -7,16 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bincode = { version = "2.0.0-rc.3", features = ["serde"] }
+bincode = { version = "2.0.0-rc.3"}
 snap = "1"
 log = "0.4"
-patricia_tree = { version = "0.6", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 thiserror = "1"
 typed-builder = "0.9"
 contracts = "0.6.3"
-bloomfilter = "1.0.12"
 
 [features]
 default = []
@@ -33,3 +29,6 @@ bench = false
 [[bench]]
 name = "db_benchmark"
 harness = false
+
+[profile.bench]
+debug = true

@@ -95,7 +95,7 @@ impl GhalaDB {
     }
 
     fn gc(&mut self) -> GhalaDbResult<()> {
-        if !self.opts.vlog_compaction_enabled || self.sweeping {
+        if !self.opts.compact || self.sweeping {
             return Ok(());
         }
         self.sweeping = true;
@@ -135,7 +135,7 @@ impl GhalaDB {
 }
 
 pub struct GhalaDBIter<'a> {
-    iter: Box<dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>> + 'a>,
+    iter: Box<dyn Iterator<Item = (&'a Bytes, &'a ValueEntry)> + 'a>,
     valman: &'a mut VlogsMan,
 }
 
@@ -154,12 +154,11 @@ impl Iterator for GhalaDBIter<'_> {
 impl GhalaDBIter<'_> {
     fn nxt(&mut self) -> GhalaDbResult<Option<(Bytes, Bytes)>> {
         loop {
-            if let Some(kv) = self.iter.next() {
-                let (_, v) = kv?;
+            if let Some((_, v)) = self.iter.next() {
                 match v {
                     ValueEntry::Tombstone => continue,
                     ValueEntry::Val(dp) => {
-                        let v = self.valman.get(&dp)?;
+                        let v = self.valman.get(dp)?;
                         return Ok(Some((v.key, v.val)));
                     }
                 }
@@ -318,7 +317,7 @@ mod tests {
         let tmp_dir = tempdir()?;
         let opts = DatabaseOptions::builder()
             .max_vlog_size(10000 * 1024)
-            .vlog_compaction_enabled(true)
+            .compact(true)
             .sync(false)
             .build();
         let unchanged: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();

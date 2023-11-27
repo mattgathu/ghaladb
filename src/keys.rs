@@ -61,8 +61,12 @@ impl Skt {
 
     pub fn put(&mut self, k: Bytes, v: ValueEntry) -> GhalaDbResult<()> {
         self.map.insert(k, v);
+        // 10 seconds staleness
+        // TODO: configure
+        if Self::time()? - self.magic > 10u128.pow(9) {
+            self.sync()?;
+        }
         self.magic = Self::time()?;
-        //TODO: sync if delta is large
         Ok(())
     }
 
@@ -72,12 +76,8 @@ impl Skt {
         std::mem::size_of_val(&self.map)
     }
 
-    //TODO: remove clone
-    pub fn iter(
-        &self,
-    ) -> Box<dyn Iterator<Item = GhalaDbResult<(Bytes, ValueEntry)>> + '_> {
-        let it = self.map.iter().map(|(k, v)| Ok((k.clone(), *v)));
-        Box::new(it)
+    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, &ValueEntry)> {
+        self.map.iter()
     }
 
     pub fn sync(&self) -> GhalaDbResult<()> {

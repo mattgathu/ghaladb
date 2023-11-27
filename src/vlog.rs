@@ -46,7 +46,7 @@ pub(crate) struct Vlog {
     num: VlogNum,
     w_off: u64,
     buf: Vec<(DataPtr, Bytes)>,
-    conf: VlogConfig,
+    conf: DatabaseOptions,
     buf_sz: usize,
     path: PathBuf,
     active: bool,
@@ -59,7 +59,7 @@ impl Vlog {
         wtr: BufWriter<File>,
         num: VlogNum,
         offset: u64,
-        conf: VlogConfig,
+        conf: DatabaseOptions,
         path: PathBuf,
     ) -> Vlog {
         let dec = Dec::new(conf.compress);
@@ -80,7 +80,7 @@ impl Vlog {
     fn from_path(
         path: PathBuf,
         num: VlogNum,
-        conf: VlogConfig,
+        conf: DatabaseOptions,
     ) -> GhalaDbResult<Vlog> {
         let mut wtr = BufWriter::new(
             OpenOptions::new().create(true).append(true).open(&path)?,
@@ -132,7 +132,7 @@ impl Vlog {
         let de_bytes = self.ser(de)?;
         let dp_sz = DataPtr::serde_sz() as u64;
         //TODO: write to disk if buffer too small
-        if self.buf_sz + de_bytes.len() > self.conf.mem_buf_size
+        if self.buf_sz + de_bytes.len() > self.conf.vlog_mem_buf_size
             && !self.buf.is_empty()
         {
             self.flush()?;
@@ -151,7 +151,7 @@ impl Vlog {
     }
 
     fn put(&mut self, entry: &DataEntry) -> GhalaDbResult<DataPtr> {
-        if self.conf.mem_buf_enabled {
+        if self.conf.vlog_mem_buf_enabled && !self.conf.sync {
             let dp = self.write_to_buf(entry)?;
             Ok(dp)
         } else {
@@ -236,7 +236,7 @@ impl Vlog {
 }
 impl Drop for Vlog {
     fn drop(&mut self) {
-        if self.conf.mem_buf_enabled {
+        if self.conf.vlog_mem_buf_enabled {
             self.flush().ok();
             debug_assert!(self.buf.is_empty(), "buf not empty at drop");
         }
@@ -308,21 +308,6 @@ impl Iterator for VlogIter {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct VlogConfig {
-    mem_buf_enabled: bool,
-    mem_buf_size: usize,
-    compress: bool,
-}
-impl From<&DatabaseOptions> for VlogConfig {
-    fn from(opts: &DatabaseOptions) -> Self {
-        Self {
-            mem_buf_enabled: opts.vlog_mem_buf_enabled,
-            mem_buf_size: opts.vlog_mem_buf_size,
-            compress: opts.compress_data,
-        }
-    }
-}
 #[derive(Debug, Clone, Encode, Decode)]
 struct VlogsInfo {
     vlogs: Vec<VlogNum>,
@@ -343,7 +328,7 @@ impl VlogsMan {
         let mut seq = VlogNum::MIN;
         for vnum in info.vlogs {
             let lpath = base_path.join(format!("{}.vlog", vnum));
-            let vlog = Vlog::from_path(lpath, vnum, VlogConfig::from(&conf))?;
+            let vlog = Vlog::from_path(lpath, vnum, conf.clone())?;
             vlogs.insert(vnum, vlog);
             seq = std::cmp::max(vnum, seq);
         }
@@ -453,8 +438,7 @@ impl VlogsMan {
     #[debug_requires(!self.vlogs.contains_key(&self.seq))]
     fn create_new_vlog(&self) -> GhalaDbResult<Vlog> {
         let path = self.base_path.join(format!("{}.vlog", self.seq));
-        let conf = VlogConfig::from(&self.conf);
-        let vlog = Vlog::from_path(path, self.seq, conf)?;
+        let vlog = Vlog::from_path(path, self.seq, self.conf.clone())?;
         Ok(vlog)
     }
 }
@@ -473,11 +457,7 @@ mod tests {
     use tempfile::{tempdir, TempDir};
     fn init_vlog(temp_dir: &TempDir) -> GhalaDbResult<Vlog> {
         let file_path = temp_dir.path().join("test_vlog.db");
-        let conf = VlogConfig {
-            mem_buf_enabled: true,
-            mem_buf_size: 1024,
-            compress: true,
-        };
+        let conf = DatabaseOptions::builder().vlog_mem_buf_size(1024).build();
 
         Vlog::from_path(file_path.clone(), 1, conf)
     }
@@ -486,11 +466,9 @@ mod tests {
     fn vlog_iter() -> GhalaDbResult<()> {
         let tmp_dir = tempdir()?;
         let path = tmp_dir.path().join("1.vlog");
-        let conf = VlogConfig {
-            mem_buf_size: 1_000_000,
-            mem_buf_enabled: true,
-            compress: true,
-        };
+        let conf = DatabaseOptions::builder()
+            .vlog_mem_buf_size(1_000_000)
+            .build();
         let mut vlog = Vlog::from_path(path.clone(), 1, conf)?;
         let data: Vec<DataEntry> = (0..100)
             .map(|_| DataEntry::new(Bytes::gen(), Bytes::gen()))

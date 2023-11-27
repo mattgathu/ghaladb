@@ -15,10 +15,10 @@ pub struct DatabaseOptions {
     /// disk.
     #[builder(default = false)]
     pub sync: bool,
-    /// vlog compaction enabled
+    /// enable vlog compaction
     #[builder(default = true)]
-    pub vlog_compaction_enabled: bool,
-    /// data compression enabled
+    pub compact: bool,
+    /// enable data compression
     #[builder(default = true)]
-    pub compress_data: bool,
+    pub compress: bool,
 }

@@ -4,18 +4,18 @@ use crate::{
     core::VlogNum,
     error::GhalaDbResult,
     keys::Skt,
-    vlog::{DataEntry, VlogIter},
+    vlog::{DataEntry, VlogReader},
 };
 
 pub(crate) struct Janitor {
     vnum: VlogNum,
-    vlog_iter: VlogIter,
+    vlog_iter: VlogReader,
 }
 
 impl Janitor {
     pub fn new(vnum: VlogNum, path: &Path) -> GhalaDbResult<Self> {
         debug!("init janitor for vlog: {vnum} at: {path:?}");
-        let vlog_iter = VlogIter::from_path(path)?;
+        let vlog_iter = VlogReader::from_path(path)?;
         Ok(Self { vnum, vlog_iter })
     }
 

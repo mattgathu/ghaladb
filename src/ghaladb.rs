@@ -106,7 +106,7 @@ impl GhalaDB {
                 t!("vlogs_man::drop_vlog", self.vlogs_man.drop_vlog(jan.vnum()))?;
                 self.janitor = None;
             }
-        } else if let Some((vnum, path)) = self.vlogs_man.needs_gc()? {
+        } else if let Some((vnum, path)) = self.vlogs_man.get_gc_cand()? {
             let janitor = t!("janitor::new", Janitor::new(vnum, &path))?;
             self.janitor = Some(janitor);
         }

@@ -246,12 +246,11 @@ impl Drop for Vlog {
     }
 }
 
-//TODO: Rename to VlogReader
-pub(crate) struct VlogIter {
+pub(crate) struct VlogReader {
     rdr: BufReader<File>,
     dec: Dec,
 }
-impl VlogIter {
+impl VlogReader {
     pub fn from_path(path: &Path) -> GhalaDbResult<Self> {
         let rdr = BufReader::new(OpenOptions::new().read(true).open(path)?);
         let dec = Dec::new(true);
@@ -297,7 +296,7 @@ impl VlogIter {
         }
     }
 }
-impl Iterator for VlogIter {
+impl Iterator for VlogReader {
     type Item = GhalaDbResult<(DataPtr, DataEntry)>;
     fn next(&mut self) -> Option<Self::Item> {
         match self.next_entry() {
@@ -400,7 +399,7 @@ impl VlogsMan {
     // amount of time (the age-threshold) before they are allowed to become
     // candidates for garbage collect
     //
-    pub fn needs_gc(&mut self) -> GhalaDbResult<Option<(VlogNum, PathBuf)>> {
+    pub fn get_gc_cand(&mut self) -> GhalaDbResult<Option<(VlogNum, PathBuf)>> {
         if self.vlogs.len() > 3 {
             let vnum = self.vlogs.keys().next().unwrap();
             let path = self.base_path.join(format!("{}.vlog", vnum));
@@ -477,7 +476,7 @@ mod tests {
             vlog.put(de)?;
         }
         drop(vlog);
-        let vlog_iter = VlogIter::from_path(&path)?;
+        let vlog_iter = VlogReader::from_path(&path)?;
         let iter_data: Vec<DataEntry> = vlog_iter
             .into_iter()
             .map(|i| i.map(|(_dp, de)| de))

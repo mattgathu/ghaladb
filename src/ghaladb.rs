@@ -1,6 +1,6 @@
 use crate::{
     config::DatabaseOptions,
-    core::{Bytes, ValueEntry},
+    core::{Bytes, KeyRef, ValueEntry},
     error::{GhalaDBError, GhalaDbResult},
     gc::Janitor,
     keys::Skt,
@@ -31,34 +31,32 @@ impl GhalaDB {
         path: P,
         options: Option<DatabaseOptions>,
     ) -> GhalaDbResult<GhalaDB> {
-        debug!("database init. path: {:?}", path.as_ref());
+        info!("database init. path: {:?}", path.as_ref());
         debug!("database init with options: {:#?}", options);
-        let db_options =
-            options.unwrap_or_else(|| DatabaseOptions::builder().build());
+        let opts = options.unwrap_or_else(|| DatabaseOptions::builder().build());
         Self::init_dir(path.as_ref())?;
         let skt_path = path.as_ref().join("skt");
 
-        let vlogs_man = VlogsMan::new(path.as_ref(), db_options.clone())?;
-        let keys = Skt::from_path(skt_path, db_options.clone())?;
+        let vlogs_man = VlogsMan::new(path.as_ref(), opts.clone())?;
+        let keys = Skt::from_path(skt_path, opts.clone())?;
         let janitor = None;
         let db = GhalaDB {
             keys,
             vlogs_man,
             janitor,
-            opts: db_options,
+            opts,
             sweeping: false,
         };
         Ok(db)
     }
 
-    //TODO: take keyref
-    pub fn delete(&mut self, key: Bytes) -> GhalaDbResult<()> {
+    pub fn delete(&mut self, key: KeyRef) -> GhalaDbResult<()> {
         trace!("deleting: {:?}", key);
-        t!("keys::del", self.keys.delete(&key))?;
+        t!("keys::del", self.keys.delete(key))?;
         Ok(())
     }
 
-    pub fn get(&mut self, key: &[u8]) -> GhalaDbResult<Option<Bytes>> {
+    pub fn get(&mut self, key: KeyRef) -> GhalaDbResult<Option<Bytes>> {
         if let Some(dp) = self.keys.get(key) {
             let bytes = t!("vlogman::get", self.vlogs_man.get(&dp))?.val;
             Ok(Some(bytes))
@@ -215,7 +213,7 @@ mod tests {
         let v = "world".as_bytes().to_vec();
         db.put(k.clone(), v.clone())?;
         assert_eq!(db.get(&k)?, Some(v));
-        db.delete(k.clone())?;
+        db.delete(&k)?;
         assert_eq!(db.get(&k)?, None);
         Ok(())
     }
@@ -244,7 +242,7 @@ mod tests {
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         db.put("king".as_bytes().to_vec(), "queen".as_bytes().to_vec())?;
         db.put("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())?;
-        db.delete("king".as_bytes().to_vec())?;
+        db.delete("king".as_bytes())?;
         let entries: Vec<(Bytes, Bytes)> =
             db.iter()?.collect::<GhalaDbResult<Vec<(Bytes, Bytes)>>>()?;
         assert!(!entries
@@ -286,7 +284,7 @@ mod tests {
             db.put(k, v)?;
         }
 
-        for (k, v) in dummy_vals() {
+        for (k, v) in &dummy_vals() {
             db.delete(k)?;
             db.delete(v)?;
         }
@@ -339,7 +337,7 @@ mod tests {
             assert_eq!(db.get(k)?, Some(k.clone()))
         }
         for k in &deleted {
-            db.delete(k.clone())?;
+            db.delete(k)?;
         }
         for k in &updated {
             db.put(k.clone(), Bytes::gen())?;

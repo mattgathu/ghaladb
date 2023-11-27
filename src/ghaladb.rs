@@ -58,7 +58,7 @@ impl GhalaDB {
         Ok(())
     }
 
-    pub fn get(&mut self, key: &Bytes) -> GhalaDbResult<Option<Bytes>> {
+    pub fn get(&mut self, key: &[u8]) -> GhalaDbResult<Option<Bytes>> {
         if let Some(dp) = self.keys.get(key) {
             let bytes = t!("vlogman::get", self.vlogs_man.get(&dp))?.val;
             Ok(Some(bytes))
@@ -232,7 +232,7 @@ mod tests {
         info!("Reloading DB");
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         assert_eq!(
-            db.get(&"hello".as_bytes().to_vec())?,
+            db.get("hello".as_bytes())?,
             Some("world".as_bytes().to_vec())
         );
         Ok(())
@@ -272,10 +272,7 @@ mod tests {
         let mut db = GhalaDB::new(tmp_dir.path(), None)?;
         db.put("left".as_bytes().to_vec(), "right".as_bytes().to_vec())?;
         db.put("man".as_bytes().to_vec(), "woman".as_bytes().to_vec())?;
-        assert_eq!(
-            db.get(&"man".as_bytes().to_vec())?,
-            Some("woman".as_bytes().to_vec())
-        );
+        assert_eq!(db.get("man".as_bytes())?, Some("woman".as_bytes().to_vec()));
         Ok(())
     }
 

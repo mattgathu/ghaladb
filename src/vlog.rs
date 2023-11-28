@@ -4,7 +4,7 @@ use crate::{
     config::DatabaseOptions,
     core::{DataEntrySz, DataPtr, VlogNum},
     dec::Dec,
-    error::{GhalaDBError, GhalaDbResult},
+    error::{GhalaDbError, GhalaDbResult},
     utils::t,
 };
 use bincode::{Decode, Encode};
@@ -20,6 +20,7 @@ const VLOG_INFO_FILE: &str = "vlog_info";
 
 pub type Bytes = Vec<u8>;
 
+/// A key-value bytes pair that's persisted in a [Vlog] to disk.
 #[derive(Debug, Clone, Encode, Decode, PartialEq)]
 pub struct DataEntry {
     pub key: Bytes,
@@ -40,16 +41,33 @@ impl FixtureGen<DataEntry> for DataEntry {
     }
 }
 
+/// Values log.
+///
+/// An append-only on disk datastructure used to persist
+/// key-value pairs.
+///
+/// TODO: document data layout
 pub(crate) struct Vlog {
+    /// Data Reader
     rdr: BufReader<File>,
+    /// Data Writer
+    /// TODO: maybe make this optional
     wtr: BufWriter<File>,
+    /// Vlog number
     num: VlogNum,
+    /// Write offset
     w_off: u64,
+    /// In-memory write buffer
     buf: Vec<(DataPtr, Bytes)>,
+    /// Configuration
     conf: DatabaseOptions,
+    /// In-memory write buffer size
     buf_sz: usize,
+    /// Vlog path on disk
     path: PathBuf,
+    /// Active flag. Unused to delete stale vlogs.
     active: bool,
+    /// Data encoder and compressor
     dec: Dec,
 }
 
@@ -281,7 +299,7 @@ impl VlogReader {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 return Ok(None);
             } else {
-                return Err(GhalaDBError::IOError(e));
+                return Err(GhalaDbError::IOError(e));
             }
         }
         let dp: DataPtr = Dec::deser_raw(&buf)?;
@@ -382,7 +400,7 @@ impl VlogsMan {
         let vlog = self
             .vlogs
             .get_mut(&dp.vlog)
-            .ok_or_else(|| GhalaDBError::MissingVlog(dp.vlog))?;
+            .ok_or_else(|| GhalaDbError::MissingVlog(dp.vlog))?;
         vlog.get(dp)
     }
     pub fn put(&mut self, entry: &DataEntry) -> GhalaDbResult<DataPtr> {

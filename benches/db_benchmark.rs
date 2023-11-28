@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use ghaladb::GhalaDB;
+use ghaladb::GhalaDb;
 use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng};
 use tempfile::tempdir;
 
@@ -10,7 +10,7 @@ fn gen_bytes(rng: &mut ThreadRng, len: usize) -> Vec<u8> {
 pub fn small_kv_benchmark(c: &mut Criterion) {
     let mut rng = rand::thread_rng();
     let tmp_dir = tempdir().expect("failed to create temp dir");
-    let mut db = GhalaDB::new(tmp_dir.path(), None).unwrap();
+    let mut db = GhalaDb::new(tmp_dir.path(), None).unwrap();
 
     let mut data = (0usize..)
         .map(|_| (gen_bytes(&mut rng, 36usize), gen_bytes(&mut rng, 1000usize)));
@@ -25,7 +25,7 @@ pub fn small_kv_benchmark(c: &mut Criterion) {
         )
     });
     let tmp_dir = tempdir().expect("failed to create temp dir");
-    let mut db = GhalaDB::new(tmp_dir.path(), None).unwrap();
+    let mut db = GhalaDb::new(tmp_dir.path(), None).unwrap();
     let mut keys = (0usize..1_000_000)
         .map(|_| {
             let (k, v) =

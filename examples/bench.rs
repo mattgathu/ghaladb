@@ -1,4 +1,4 @@
-use ghaladb::{error::GhalaDbResult, GhalaDB};
+use ghaladb::{GhalaDb, GhalaDbResult};
 use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng};
 use tempfile::tempdir;
 
@@ -9,7 +9,7 @@ fn gen_bytes(rng: &mut ThreadRng, len: usize) -> Vec<u8> {
 fn main() -> GhalaDbResult<()> {
     let mut rng = rand::thread_rng();
     let tmp_dir = tempdir()?;
-    let mut db = GhalaDB::new(tmp_dir.path(), None)?;
+    let mut db = GhalaDb::new(tmp_dir.path(), None)?;
     let mut data = (0usize..1_000_000)
         .map(|_| {
             let (k, v) =

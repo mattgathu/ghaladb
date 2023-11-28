@@ -11,9 +11,13 @@ pub type DataEntrySz = u32;
 pub(crate) trait MemSize {
     fn mem_sz(&self) -> usize;
 }
+
+/// A list of possible data pointer states.
 #[derive(Debug, Copy, Clone, PartialEq, Encode, Decode)]
 pub(crate) enum ValueEntry {
+    /// A deleted value entry
     Tombstone,
+    /// A valid pointer to data on disk.
     Val(DataPtr),
 }
 impl Default for ValueEntry {
@@ -36,17 +40,23 @@ impl MemSize for Bytes {
     }
 }
 
+/// A data pointer for data on disk.
 #[derive(
     Debug, Clone, Copy, Encode, Decode, PartialEq, Hash, PartialOrd, Ord, Eq,
 )]
 pub struct DataPtr {
+    /// The value log number
     pub vlog: VlogNum,
     //TODO: we limit vlog size to 4gb and use a u32 offset
+    /// Data offset in the value log file.
     pub offset: u64,
+    /// Data size
     pub len: DataEntrySz,
+    /// Data compression flag.
     pub compressed: bool,
 }
 impl DataPtr {
+    /// Create a data pointer.
     pub fn new(vlog: VlogNum, offset: u64, len: u32, compressed: bool) -> Self {
         Self {
             vlog,

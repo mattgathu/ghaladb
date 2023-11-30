@@ -31,9 +31,6 @@ fn main() -> GhalaDbResult<()> {
 References
 --
 - https://arxiv.org/pdf/1812.07527.pdf LSM-based Storage Techniques: A Survey
-- https://www.infoq.com/articles/API-Design-Joshua-Bloch/ Joshua Bloch: Bumper-Sticker API Design
 - http://www.benstopford.com/2015/02/14/log-structured-merge-trees/ Log Structured Merge Trees
-- https://www.quora.com/How-does-the-log-structured-merge-tree-work
-- https://www.datastax.com/blog/leveled-compaction-apache-cassandra
-- http://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf
 - https://dl.acm.org/doi/pdf/10.1145/3514221.3522563 - Dissecting, Designing, and Optimizing LSM-based Data Stores
+- https://www.infoq.com/articles/API-Design-Joshua-Bloch/ Joshua Bloch: Bumper-Sticker API Design

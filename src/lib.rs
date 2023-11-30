@@ -37,6 +37,7 @@ mod ghaladb;
 mod keys;
 mod utils;
 mod vlog;
+pub use crate::config::DatabaseOptions;
 pub use crate::error::{GhalaDbError, GhalaDbResult};
 pub use crate::ghaladb::GhalaDb;
 

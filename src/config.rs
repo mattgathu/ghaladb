@@ -1,5 +1,6 @@
 use typed_builder::TypedBuilder;
 
+/// Database Configuration
 #[derive(Debug, Copy, Clone, TypedBuilder)]
 pub struct DatabaseOptions {
     /// Maximum vlog size in bytes: default 1gb

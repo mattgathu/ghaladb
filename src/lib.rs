@@ -1,9 +1,15 @@
 /*!
- GhalaDB is a Log Structured Merge trees (LSM) based key value datastore that implements keys and values
- separation inspired by the [WiscKey](https://pages.cs.wisc.edu/~ll/papers/wisckey.pdf) paper.
+GhalaDb is a key value datastore that implements keys and values separation
+inspired by the [WiscKey](https://pages.cs.wisc.edu/~ll/papers/wisckey.pdf) paper.
 
- It keeps all its keys in memory with pointers to values on disk. It's therefore suitable
- for applications that have small-sized keys.
+GhalaDb implements a SSD-conscious data layout by decoupling the storage of
+keys from values. An in-memory tree stores the keys along with pointers to
+the values, while the values are stored in a separate log file.
+This significantly reduces write amplification during ingestion,
+while facilitating faster data loading.
+
+Since GhalaDb keeps all its keys and data pointers in memory, it is suitable
+for applications that have small-sized keys.
 
 
 ```rust

@@ -330,6 +330,10 @@ struct VlogsInfo {
     vlogs: Vec<VlogNum>,
 }
 
+/// [Vlog]s manager.
+///
+/// The Vlog manager maintains a mapping of vlog numbers to the actual
+/// vlogs that it uses to redirect data requests to the write vlog.
 pub(crate) struct VlogsMan {
     base_path: PathBuf,
     vlogs: BTreeMap<VlogNum, Vlog>,
@@ -345,7 +349,7 @@ impl VlogsMan {
         let mut seq = VlogNum::MIN;
         for vnum in info.vlogs {
             let lpath = base_path.join(format!("{}.vlog", vnum));
-            let vlog = Vlog::from_path(lpath, vnum, conf.clone())?;
+            let vlog = Vlog::from_path(lpath, vnum, conf)?;
             vlogs.insert(vnum, vlog);
             seq = std::cmp::max(vnum, seq);
         }
@@ -408,15 +412,17 @@ impl VlogsMan {
         vlog.put(entry)
     }
 
-    //TODO: find better heuristic
-    //
-    // 1: Use age threshold
-    //
-    // The basic idea of our algorithm is that segments that have been recently
-    // filled by writes from the system should be forced to wait for a certain
-    // amount of time (the age-threshold) before they are allowed to become
-    // candidates for garbage collect
-    //
+    /// Get candidate vlog for garbage collection.
+    ///
+    /// Returns the vlog number and path of the vlog which is to be garbage
+    /// collected.
+    ///
+    /// The heuristic for picking the vlog is naive - we return the oldest
+    /// vlog. The idea is that vlog that have been recently written to should
+    /// wait for a certain amount of time before they are allowed to become
+    /// candidates for garbage collection.
+    ///
+    /// TODO: improve heuristic
     pub fn get_gc_cand(&mut self) -> GhalaDbResult<Option<(VlogNum, PathBuf)>> {
         if self.vlogs.len() > 3 {
             let vnum = self.vlogs.keys().next().unwrap();
@@ -455,7 +461,7 @@ impl VlogsMan {
     #[debug_requires(!self.vlogs.contains_key(&self.seq))]
     fn create_new_vlog(&self) -> GhalaDbResult<Vlog> {
         let path = self.base_path.join(format!("{}.vlog", self.seq));
-        let vlog = Vlog::from_path(path, self.seq, self.conf.clone())?;
+        let vlog = Vlog::from_path(path, self.seq, self.conf)?;
         Ok(vlog)
     }
 }

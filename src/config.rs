@@ -1,6 +1,6 @@
 use typed_builder::TypedBuilder;
 
-#[derive(Debug, Clone, TypedBuilder)]
+#[derive(Debug, Copy, Clone, TypedBuilder)]
 pub struct DatabaseOptions {
     /// Maximum vlog size in bytes: default 1gb
     #[builder(default = 1_000_000_000)]

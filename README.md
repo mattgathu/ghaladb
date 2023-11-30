@@ -1,52 +1,41 @@
-TODO
-* test read-modify-write scenarios
-    * write data to db
-    * read data and write back modified version 
-* this will introduce lots of stale data
-* test how well db copes
-RoadMap 
+GhalaDb
 --
-* KV store features
-* KV store interface
-* Component traits
-    - in-memory table
-    - wal log
-    - on-disk table
-* Code the use-cases against API
-* In-memory table implementation
-* Write Ahead Log implementation
-* On-disk table implementation
-* In-memory table to on-disk table flushing
-* On-disk tables compaction
-* Data format
-* Explore vectored IO and memory maps
-* Alloy Model
 
-### KV store features
-* Open / closing a db
-    - `new` used to open/create new db
-    - db closed when it goes out of scope
-        * need to implement finalizer code when db is `dropped`
-* Read / write data to/from db
-* Iterate kv pairs in db
-* configuration
-    * Support Async and Sync Write IO
-    * options module to house all things parametrization
-* error management
-* batch writes
-* Advanced features
-    - atomic operations
-    - db snapshots
-    - skiplist memtable: 
-        - https://github.com/crossbeam-rs/crossbeam/tree/master/crossbeam-skiplist
+A key value datastore that implements keys and values separation inspired by
+the [WiscKey](https://pages.cs.wisc.edu/~ll/papers/wisckey.pdf) paper.
 
+GhalaDb implements a SSD-conscious data layout by decoupling the storage of
+keys from values. An in-memory tree stores the keys along with pointers to
+the values, while the values are stored in a separate log file.
+This significantly reduces write amplification during ingestion,
+while facilitating faster data loading.
+
+Since GhalaDb keeps all its keys and data pointers in memory, it is suitable
+for applications that have small-sized keys.
+
+
+```rust
+use ghaladb::{GhalaDb, GhalaDbResult};
+
+fn main() -> GhalaDbResult<()> {
+    let mut db = GhalaDb::new("/tmp/ghaladb", None)?;
+    db.put("king".into(), "queen".into())?;
+    assert_eq!(
+        db.get("king".as_bytes())?.unwrap(),
+        "queen".as_bytes().to_vec()
+    );
+
+    Ok(())
+}
+```
 
 
 References
--- 
+--
 - https://arxiv.org/pdf/1812.07527.pdf LSM-based Storage Techniques: A Survey
 - https://www.infoq.com/articles/API-Design-Joshua-Bloch/ Joshua Bloch: Bumper-Sticker API Design
 - http://www.benstopford.com/2015/02/14/log-structured-merge-trees/ Log Structured Merge Trees
 - https://www.quora.com/How-does-the-log-structured-merge-tree-work
 - https://www.datastax.com/blog/leveled-compaction-apache-cassandra
 - http://static.googleusercontent.com/media/research.google.com/en//archive/bigtable-osdi06.pdf
+- https://dl.acm.org/doi/pdf/10.1145/3514221.3522563 - Dissecting, Designing, and Optimizing LSM-based Data Stores

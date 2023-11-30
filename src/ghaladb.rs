@@ -30,8 +30,8 @@ impl GhalaDb {
         Self::init_dir(path.as_ref())?;
         let skt_path = path.as_ref().join("skt");
 
-        let vlogs_man = VlogsMan::new(path.as_ref(), opts.clone())?;
-        let keys = Skt::from_path(skt_path, opts.clone())?;
+        let vlogs_man = VlogsMan::new(path.as_ref(), opts)?;
+        let keys = Skt::from_path(skt_path, opts)?;
         let janitor = None;
         let db = GhalaDb {
             keys,
@@ -295,7 +295,7 @@ mod tests {
             .max_vlog_size(4 * 1024)
             .sync(false)
             .build();
-        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts.clone()))?;
+        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
         let data = (0..100).map(|_| Bytes::gen()).collect::<Vec<_>>();
         for entry in &data {
             db.put(entry.clone(), entry.clone())?;
@@ -320,7 +320,7 @@ mod tests {
         let unchanged: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
         let deleted: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
         let updated: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
-        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts.clone()))?;
+        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
         assert!(unchanged.is_disjoint(&deleted));
         assert!(unchanged.is_disjoint(&updated));
         assert!(deleted.is_disjoint(&updated));

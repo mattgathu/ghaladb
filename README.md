@@ -1,7 +1,7 @@
 GhalaDb
 --
 ![docs.rs](https://img.shields.io/docsrs/ghaladb)
-![GitHub Workflow Status (with event)](https://img.shields.io/github/actions/workflow/status/mattgathu/ghaladb/tests)
+![GitHub Workflow Status (with event)](https://img.shields.io/github/actions/workflow/status/mattgathu/ghaladb/tests.yml)
 ![Crates.io](https://img.shields.io/crates/d/ghaladb)
 
 

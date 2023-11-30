@@ -50,11 +50,6 @@ jobs:
 
   audit:
     name: Security audit
-    on:
-      push:
-        paths: 
-          - '**/Cargo.toml'
-          - '**/Cargo.lock'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v1

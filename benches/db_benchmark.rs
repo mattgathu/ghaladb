@@ -20,7 +20,7 @@ pub fn small_kv_benchmark(c: &mut Criterion) {
     group.bench_function("put", |b| {
         b.iter_batched(
             || data.next().unwrap(),
-            |(k, v)| db.put(k, v),
+            |(k, v)| db.put(&k, &v),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -30,7 +30,7 @@ pub fn small_kv_benchmark(c: &mut Criterion) {
         .map(|_| {
             let (k, v) =
                 (gen_bytes(&mut rng, 36usize), gen_bytes(&mut rng, 1000usize));
-            db.put(k.clone(), v).ok();
+            db.put(&k, &v).ok();
             k
         })
         .collect::<Vec<_>>();

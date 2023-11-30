@@ -25,7 +25,6 @@ tempfile = "*"
 
 [lib]
 bench = false
-doctest = false
 
 [[bench]]
 name = "db_benchmark"

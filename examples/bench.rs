@@ -18,7 +18,7 @@ fn main() -> GhalaDbResult<()> {
         })
         .collect::<Vec<_>>();
     for (k, v) in &data {
-        db.put(k.clone(), v.clone())?;
+        db.put(k,v)?;
     }
     for (k, _) in &data {
         db.get(k)?;

@@ -11,6 +11,8 @@ while facilitating faster data loading.
 Since GhalaDb keeps all its keys and data pointers in memory, it is suitable
 for applications that have small-sized keys.
 
+<div class="warning">!! GhalaDb is experimental software and might not be suitable for your use case.</div>
+
 
 ```rust
 use ghaladb::{GhalaDb, GhalaDbResult};

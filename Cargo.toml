@@ -29,7 +29,7 @@ default = []
 criterion = { version = "0.3", features = ["html_reports"] }
 rand = "0.8"
 env_logger = "0.10"
-tempfile = "*"
+tempfile = "3"
 
 [lib]
 bench = false

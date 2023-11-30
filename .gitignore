@@ -1,0 +1,7 @@
+/target
+Cargo.lock
+/lit
+.DS_Store
+.vscode
+lcov.info
+flamegraph*

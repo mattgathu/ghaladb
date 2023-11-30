@@ -1,0 +1,42 @@
+[package]
+name = "ghaladb"
+version = "0.1.0"
+authors = ["Matt Gathu <mattgathu@gmail.com>"]
+edition = "2021"
+description = "LSM tree based key value store with keys and values separation."
+repository = "https://github.com/mattgathu/ghaladb"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["lsm-tree", "database"]
+categories = ["database-implementations"]
+documentation = "https://docs.rs/ghaladb"
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bincode = { version = "2.0.0-rc.3" }
+snap = "1"
+log = "0.4"
+thiserror = "1"
+typed-builder = "0.9"
+contracts = "0.6"
+
+[features]
+default = []
+
+[dev-dependencies]
+criterion = { version = "0.3", features = ["html_reports"] }
+rand = "0.8"
+env_logger = "0.10"
+tempfile = "*"
+
+[lib]
+bench = false
+
+[[bench]]
+name = "db_benchmark"
+harness = false
+
+[profile.bench]
+debug = true

@@ -47,7 +47,6 @@ impl MemSize for Bytes {
 pub struct DataPtr {
     /// The value log number
     pub vlog: VlogNum,
-    //TODO: we limit vlog size to 4gb and use a u32 offset
     /// Data offset in the value log file.
     pub offset: u64,
     /// Data size

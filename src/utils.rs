@@ -1,7 +1,10 @@
 macro_rules! t {
     ($id:expr, $expr:expr $(,)?) => {
         match $expr {
-            Ok(val) => Ok(val),
+            Ok(val) => {
+                trace!("{} ok.", $id);
+                Ok(val)
+            }
             Err(err) => {
                 error!("{} failed. Reason: {err:?}", $id);
                 Err(err)

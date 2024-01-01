@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::{
     core::VlogNum,
     error::GhalaDbResult,
-    keys::Skt,
+    keys::Keys,
     vlog::{DataEntry, VlogReader},
 };
 
@@ -44,7 +44,7 @@ impl Janitor {
         Ok(Self { vnum, vlog_iter })
     }
 
-    pub fn sweep(&mut self, keys: &mut Skt) -> GhalaDbResult<Option<DataEntry>> {
+    pub fn sweep(&mut self, keys: &mut Keys) -> GhalaDbResult<Option<DataEntry>> {
         trace!("Janitor::sweep");
         loop {
             match self.vlog_iter.next_entry()? {

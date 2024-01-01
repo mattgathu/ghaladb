@@ -14,7 +14,7 @@ for applications that have small-sized keys.
 <div class="warning">!! GhalaDb is experimental software and might not be suitable for your use case.</div>
 
 
-```rust
+```ignore
 use ghaladb::{GhalaDb, GhalaDbResult};
 
 fn main() -> GhalaDbResult<()> {

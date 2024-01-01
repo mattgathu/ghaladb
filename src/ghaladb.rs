@@ -1,13 +1,14 @@
 use bincode::Decode;
 use bincode::Encode;
 
+use crate::core::DataPtr;
 use crate::{
     config::DatabaseOptions,
-    core::{Bytes, ValueEntry},
+    core::Bytes,
     dec::Dec,
     error::{GhalaDbError, GhalaDbResult},
     gc::Janitor,
-    keys::Skt,
+    keys::Keys,
     utils::t,
     vlog::{DataEntry, VlogsMan},
 };
@@ -20,8 +21,8 @@ where
     K: Encode + Decode,
     V: Encode + Decode,
 {
-    /// Sorted Keys Table
-    keys: Skt,
+    /// Keys Table
+    keys: Keys,
     /// Values logs manager
     vlogs_man: VlogsMan,
     /// Garbage Collector
@@ -45,10 +46,10 @@ where
         trace!("GhalaDb::new path: {}", path.as_ref().display());
         let opts = options.unwrap_or_else(|| DatabaseOptions::builder().build());
         Self::init_dir(path.as_ref())?;
-        let skt_path = path.as_ref().join("skt");
+        let keys_path = path.as_ref().join("keys");
 
         let vlogs_man = VlogsMan::new(path.as_ref(), opts)?;
-        let keys = Skt::from_path(skt_path, opts)?;
+        let keys = Keys::from_path(keys_path, opts)?;
         let janitor = None;
         let db = GhalaDb {
             keys,
@@ -105,7 +106,7 @@ where
         trace!("GhalaDb::put_raw key:{key:?}");
         let de = DataEntry::new(key.clone(), val);
         let dp = t!("vlogman::put", self.vlogs_man.put(&de))?;
-        t!("keys::put", self.keys.put(key, ValueEntry::Val(dp)))?;
+        t!("keys::put", self.keys.put(key, dp))?;
         if !from_gc {
             t!("gc", self.gc())?;
         }
@@ -178,7 +179,7 @@ where
 }
 
 pub struct GhalaDbIter<'a, K, V> {
-    iter: Box<dyn Iterator<Item = (&'a Bytes, &'a ValueEntry)> + 'a>,
+    iter: Box<dyn Iterator<Item = (&'a Bytes, &'a DataPtr)> + 'a>,
     valman: &'a mut VlogsMan,
     _k: PhantomData<K>,
     _v: PhantomData<V>,
@@ -206,20 +207,13 @@ where
     V: Decode,
 {
     fn nxt(&mut self) -> GhalaDbResult<Option<(K, V)>> {
-        loop {
-            if let Some((_, v)) = self.iter.next() {
-                match v {
-                    ValueEntry::Tombstone => continue,
-                    ValueEntry::Val(dp) => {
-                        let v = self.valman.get(dp)?;
-                        let key: K = Dec::deser_raw(&v.key)?;
-                        let val: V = Dec::deser_raw(&v.val)?;
-                        return Ok(Some((key, val)));
-                    }
-                }
-            } else {
-                return Ok(None);
-            }
+        if let Some((_, dp)) = self.iter.next() {
+            let v = self.valman.get(dp)?;
+            let key: K = Dec::deser_raw(&v.key)?;
+            let val: V = Dec::deser_raw(&v.val)?;
+            Ok(Some((key, val)))
+        } else {
+            Ok(None)
         }
     }
 }

@@ -12,28 +12,6 @@ pub(crate) trait MemSize {
     fn mem_sz(&self) -> usize;
 }
 
-/// A list of possible data pointer states.
-#[derive(Debug, Copy, Clone, PartialEq, Encode, Decode)]
-pub(crate) enum ValueEntry {
-    /// A deleted value entry
-    Tombstone,
-    /// A valid pointer to data on disk.
-    Val(DataPtr),
-}
-impl Default for ValueEntry {
-    fn default() -> Self {
-        Self::Tombstone
-    }
-}
-impl MemSize for ValueEntry {
-    fn mem_sz(&self) -> usize {
-        match self {
-            Self::Val(dp) => dp.mem_sz(),
-            Self::Tombstone => 0usize,
-        }
-    }
-}
-
 impl MemSize for Bytes {
     fn mem_sz(&self) -> usize {
         self.len()
@@ -64,9 +42,7 @@ impl DataPtr {
             compressed,
         }
     }
-    pub fn mem_sz(&self) -> usize {
-        std::mem::size_of_val(self)
-    }
+
     pub fn serde_sz() -> usize {
         // u64 + u64 + u32 +bool
         21

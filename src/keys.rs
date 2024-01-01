@@ -15,21 +15,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// Sorted Keys Table
+/// Keys
 ///
 /// This is an in-memory map that stores keys and their data pointer.
 /// It is automatically synced to disk during datastore shutdown (when GhalaDb is dropped)
 /// but it can also be synced manually using the `sync` method of GhalaDb.
 #[derive(Encode, Decode, Debug)]
-pub(crate) struct Skt {
+pub(crate) struct Keys {
     map: BTreeMap<Bytes, DataPtr>,
     path: PathBuf,
     magic: u128,
     conf: DatabaseOptions,
 }
 
-impl Skt {
-    pub fn new(path: PathBuf, conf: DatabaseOptions) -> Skt {
+impl Keys {
+    pub fn new(path: PathBuf, conf: DatabaseOptions) -> Keys {
         let map = BTreeMap::new();
         let magic = 0;
         Self {
@@ -43,32 +43,32 @@ impl Skt {
     pub fn from_path<P: AsRef<Path>>(
         path: P,
         conf: DatabaseOptions,
-    ) -> GhalaDbResult<Skt> {
-        let skt = if path.as_ref().exists() {
+    ) -> GhalaDbResult<Keys> {
+        let keys = if path.as_ref().exists() {
             let mut rdr =
                 BufReader::new(OpenOptions::new().read(true).open(path.as_ref())?);
             let mut buf = vec![];
             rdr.read_to_end(&mut buf)?;
             Dec::deser_raw(&buf)?
         } else {
-            Skt::new(path.as_ref().to_path_buf(), conf)
+            Keys::new(path.as_ref().to_path_buf(), conf)
         };
-        Ok(skt)
+        Ok(keys)
     }
 
     pub fn delete(&mut self, key: KeyRef) -> GhalaDbResult<()> {
-        trace!("Skt::delete");
+        trace!("Keys::delete");
         self.map.remove(key);
         Ok(())
     }
 
     pub fn get(&mut self, key: KeyRef) -> Option<DataPtr> {
-        trace!("Skt::get");
+        trace!("Keys::get");
         self.map.get(key).copied()
     }
 
     pub fn put(&mut self, k: Bytes, v: DataPtr) -> GhalaDbResult<()> {
-        trace!("Skt::put");
+        trace!("Keys::put");
         self.map.insert(k, v);
         let elapsed = Self::time()? - self.magic;
 
@@ -85,7 +85,7 @@ impl Skt {
 
     // TODO: implement partial sync to only update changes instead of entire table
     pub fn sync(&self) -> GhalaDbResult<()> {
-        trace!("Skt::sync");
+        trace!("Keys::sync");
         let mut wtr = BufWriter::new(
             OpenOptions::new()
                 .write(true)
@@ -101,8 +101,8 @@ impl Skt {
         Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())
     }
 }
-impl Drop for Skt {
+impl Drop for Keys {
     fn drop(&mut self) {
-        t!("Skt::sync", self.sync()).ok();
+        t!("Keys::sync", self.sync()).ok();
     }
 }

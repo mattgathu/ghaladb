@@ -8,7 +8,7 @@ use crate::{
     dec::Dec,
     error::{GhalaDbError, GhalaDbResult},
     gc::Janitor,
-    keys::Skt,
+    keys::Keys,
     utils::t,
     vlog::{DataEntry, VlogsMan},
 };
@@ -21,8 +21,8 @@ where
     K: Encode + Decode,
     V: Encode + Decode,
 {
-    /// Sorted Keys Table
-    keys: Skt,
+    /// Keys Table
+    keys: Keys,
     /// Values logs manager
     vlogs_man: VlogsMan,
     /// Garbage Collector
@@ -46,10 +46,10 @@ where
         trace!("GhalaDb::new path: {}", path.as_ref().display());
         let opts = options.unwrap_or_else(|| DatabaseOptions::builder().build());
         Self::init_dir(path.as_ref())?;
-        let skt_path = path.as_ref().join("skt");
+        let keys_path = path.as_ref().join("keys");
 
         let vlogs_man = VlogsMan::new(path.as_ref(), opts)?;
-        let keys = Skt::from_path(skt_path, opts)?;
+        let keys = Keys::from_path(keys_path, opts)?;
         let janitor = None;
         let db = GhalaDb {
             keys,

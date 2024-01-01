@@ -1,6 +1,6 @@
 use crate::{
     config::DatabaseOptions,
-    core::{Bytes, DataPtr, KeyRef, ValueEntry},
+    core::{Bytes, DataPtr, KeyRef},
     dec::Dec,
     error::GhalaDbResult,
     utils::t,
@@ -22,7 +22,7 @@ use std::{
 /// but it can also be synced manually using the `sync` method of GhalaDb.
 #[derive(Encode, Decode, Debug)]
 pub(crate) struct Skt {
-    map: BTreeMap<Bytes, ValueEntry>,
+    map: BTreeMap<Bytes, DataPtr>,
     path: PathBuf,
     magic: u128,
     conf: DatabaseOptions,
@@ -64,13 +64,10 @@ impl Skt {
 
     pub fn get(&mut self, key: KeyRef) -> Option<DataPtr> {
         trace!("Skt::get");
-        self.map.get(key).and_then(|ve| match ve {
-            ValueEntry::Val(dp) => Some(*dp),
-            ValueEntry::Tombstone => None,
-        })
+        self.map.get(key).copied()
     }
 
-    pub fn put(&mut self, k: Bytes, v: ValueEntry) -> GhalaDbResult<()> {
+    pub fn put(&mut self, k: Bytes, v: DataPtr) -> GhalaDbResult<()> {
         trace!("Skt::put");
         self.map.insert(k, v);
         let elapsed = Self::time()? - self.magic;
@@ -82,7 +79,7 @@ impl Skt {
         Ok(())
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, &ValueEntry)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, &DataPtr)> {
         self.map.iter()
     }
 

@@ -20,11 +20,14 @@ where
     K: Encode + Decode,
     V: Encode + Decode,
 {
+    /// Sorted Keys Table
     keys: Skt,
+    /// Values logs manager
     vlogs_man: VlogsMan,
+    /// Garbage Collector
     janitor: Option<Janitor>,
+    /// Database Configs
     opts: DatabaseOptions,
-    sweeping: bool,
     _k: PhantomData<K>,
     _v: PhantomData<V>,
 }
@@ -39,8 +42,7 @@ where
         path: P,
         options: Option<DatabaseOptions>,
     ) -> GhalaDbResult<GhalaDb<K, V>> {
-        info!("database init. path: {:?}", path.as_ref());
-        debug!("database init with options: {:#?}", options);
+        trace!("GhalaDb::new path: {}", path.as_ref().display());
         let opts = options.unwrap_or_else(|| DatabaseOptions::builder().build());
         Self::init_dir(path.as_ref())?;
         let skt_path = path.as_ref().join("skt");
@@ -53,7 +55,6 @@ where
             vlogs_man,
             janitor,
             opts,
-            sweeping: false,
             _k: PhantomData,
             _v: PhantomData,
         };
@@ -61,14 +62,23 @@ where
     }
 
     /// Deletes a key from the data store.
+    ///
+    /// We simply remove the key from the in-memory keys table.
     pub fn delete(&mut self, key: &K) -> GhalaDbResult<()> {
+        trace!("GhalaDb::delete");
         let key = Dec::ser_raw(key)?;
         t!("keys::del", self.keys.delete(&key))?;
+        t!("gc", self.gc())?;
         Ok(())
     }
 
     /// Returns the value corresponding to the key.
+    ///
+    /// We first do a data pointer lookup in the in-memory keys table
+    /// and then use the pointer to read the actual data entry from a
+    /// vlog on disk.
     pub fn get(&mut self, key: &K) -> GhalaDbResult<Option<V>> {
+        trace!("GhalaDb::get");
         let key = Dec::ser_raw(key)?;
         if let Some(dp) = self.keys.get(&key) {
             let bytes = t!("vlogman::get", self.vlogs_man.get(&dp))?.val;
@@ -83,15 +93,22 @@ where
     pub fn put(&mut self, k: &K, v: &V) -> GhalaDbResult<()> {
         let key = Dec::ser_raw(k)?;
         let val = Dec::ser_raw(v)?;
-        self.put_raw(key, val)
+        self.put_raw(key, val, false)
     }
 
-    fn put_raw(&mut self, key: Bytes, val: Bytes) -> GhalaDbResult<()> {
-        trace!("updating: {key:?}");
+    fn put_raw(
+        &mut self,
+        key: Bytes,
+        val: Bytes,
+        from_gc: bool,
+    ) -> GhalaDbResult<()> {
+        trace!("GhalaDb::put_raw key:{key:?}");
         let de = DataEntry::new(key.clone(), val);
         let dp = t!("vlogman::put", self.vlogs_man.put(&de))?;
         t!("keys::put", self.keys.put(key, ValueEntry::Val(dp)))?;
-        t!("gc", self.gc())?;
+        if !from_gc {
+            t!("gc", self.gc())?;
+        }
 
         Ok(())
     }
@@ -100,6 +117,7 @@ where
     pub fn iter(
         &mut self,
     ) -> GhalaDbResult<impl Iterator<Item = GhalaDbResult<(K, V)>> + '_> {
+        trace!("GhalaDb::iter");
         let db_iter: GhalaDbIter<K, V> = GhalaDbIter {
             iter: Box::new(self.keys.iter()),
             valman: &mut self.vlogs_man,
@@ -112,20 +130,23 @@ where
 
     /// Attempts to sync all data to disk.
     pub fn sync(&mut self) -> GhalaDbResult<()> {
+        trace!("GhalaDb::sync");
         self.keys.sync()?;
         self.vlogs_man.sync()?;
         Ok(())
     }
 
     fn gc(&mut self) -> GhalaDbResult<()> {
-        if !self.opts.compact || self.sweeping {
+        trace!("GhalaDb::gc");
+        if !self.opts.compact {
             return Ok(());
         }
-        self.sweeping = true;
         if let Some(ref mut jan) = self.janitor {
             if let Some(de) = jan.sweep(&mut self.keys)? {
-                t!("gc::put_raw", self.put_raw(de.key, de.val))?;
+                // Janitor found a live data entry. Re-insert it.
+                t!("gc::put_raw", self.put_raw(de.key, de.val, true))?;
             } else {
+                // Janitor has finished going through the vlog.
                 t!("vlogs_man::drop_vlog", self.vlogs_man.drop_vlog(jan.vnum()))?;
                 self.janitor = None;
             }
@@ -133,13 +154,12 @@ where
             let janitor = t!("janitor::new", Janitor::new(vnum, &path))?;
             self.janitor = Some(janitor);
         }
-        self.sweeping = false;
 
         Ok(())
     }
 
     fn init_dir(path: &Path) -> GhalaDbResult<()> {
-        trace!("initializing db directory: {:?}", path);
+        trace!("GhalaDb::init_dir : {}", path.display());
         match std::fs::create_dir_all(path) {
             Ok(_) => Ok(()),
             Err(e) => match e.kind() {
@@ -328,6 +348,32 @@ mod tests {
             db.delete(k)?;
             db.delete(v)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn gc_shrinks_vlogs() -> GhalaDbResult<()> {
+        env_logger::try_init().ok();
+        let tmp_dir = tempdir()?;
+        let opts = DatabaseOptions::builder()
+            .max_vlog_size(4 * 1024)
+            .sync(false)
+            .build();
+        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
+        let data = (0..100).map(|_| Bytes::gen()).collect::<Vec<_>>();
+        for entry in &data {
+            db.put(entry, entry)?;
+        }
+        let old_count = db.vlogs_man.vlogs_count();
+        for key in data.iter().take(50) {
+            db.delete(key)?;
+        }
+        let count = db.vlogs_man.vlogs_count();
+        assert!(
+            count < old_count,
+            "vlogs count wrong: old {old_count} > cur {count}"
+        );
+
         Ok(())
     }
 

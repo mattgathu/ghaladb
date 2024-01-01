@@ -25,16 +25,21 @@ pub(crate) struct Skt {
     map: BTreeMap<Bytes, ValueEntry>,
     path: PathBuf,
     magic: u128,
+    conf: DatabaseOptions,
 }
 
 impl Skt {
-    pub fn new(path: PathBuf) -> Skt {
+    pub fn new(path: PathBuf, conf: DatabaseOptions) -> Skt {
         let map = BTreeMap::new();
         let magic = 0;
-        Self { map, path, magic }
+        Self {
+            map,
+            path,
+            magic,
+            conf,
+        }
     }
 
-    #[allow(unused)]
     pub fn from_path<P: AsRef<Path>>(
         path: P,
         conf: DatabaseOptions,
@@ -46,17 +51,19 @@ impl Skt {
             rdr.read_to_end(&mut buf)?;
             Dec::deser_raw(&buf)?
         } else {
-            Skt::new(path.as_ref().to_path_buf())
+            Skt::new(path.as_ref().to_path_buf(), conf)
         };
         Ok(skt)
     }
 
     pub fn delete(&mut self, key: KeyRef) -> GhalaDbResult<()> {
+        trace!("Skt::delete");
         self.map.remove(key);
         Ok(())
     }
 
     pub fn get(&mut self, key: KeyRef) -> Option<DataPtr> {
+        trace!("Skt::get");
         self.map.get(key).and_then(|ve| match ve {
             ValueEntry::Val(dp) => Some(*dp),
             ValueEntry::Tombstone => None,
@@ -64,27 +71,24 @@ impl Skt {
     }
 
     pub fn put(&mut self, k: Bytes, v: ValueEntry) -> GhalaDbResult<()> {
+        trace!("Skt::put");
         self.map.insert(k, v);
-        // 10 seconds staleness
-        // TODO: configure
-        if Self::time()? - self.magic > 10u128.pow(9) {
+        let elapsed = Self::time()? - self.magic;
+
+        if elapsed > (self.conf.keys_sync_interval * 10u128.pow(9)) {
             self.sync()?;
         }
         self.magic = Self::time()?;
         Ok(())
     }
 
-    //TODO: verify
-    #[allow(unused)]
-    pub fn mem_size(&self) -> usize {
-        std::mem::size_of_val(&self.map)
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = (&Bytes, &ValueEntry)> {
         self.map.iter()
     }
 
+    // TODO: implement partial sync to only update changes instead of entire table
     pub fn sync(&self) -> GhalaDbResult<()> {
+        trace!("Skt::sync");
         let mut wtr = BufWriter::new(
             OpenOptions::new()
                 .write(true)

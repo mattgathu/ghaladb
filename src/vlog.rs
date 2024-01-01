@@ -43,15 +43,28 @@ impl FixtureGen<DataEntry> for DataEntry {
 
 /// Values log.
 ///
-/// An append-only on disk datastructure used to persist
+/// An append-only on disk data structure used to persist
 /// key-value pairs.
 ///
-/// TODO: document data layout
+/// The on-disk data layout on the vlog is:
+///
+/// | START |
+/// |:----------:|
+/// | Data ptr 1 <21 bytes>|
+/// | Data entry 1 |
+/// | Data ptr 2 <21 bytes>|
+/// | Data entry 2 |
+/// | . |
+/// | . |
+/// | . |
+/// | . |
+/// | Data ptr N <21 bytes>|
+/// | Data entry N |
+/// | END |
 pub(crate) struct Vlog {
     /// Data Reader
     rdr: BufReader<File>,
     /// Data Writer
-    /// TODO: maybe make this optional
     wtr: BufWriter<File>,
     /// Vlog number
     num: VlogNum,
@@ -114,7 +127,6 @@ impl Vlog {
         self.active = false;
     }
 
-    // TODO: can we cache hot entries in mem
     fn get(&mut self, dp: &DataPtr) -> GhalaDbResult<DataEntry> {
         if let Some(de) = self.get_from_buf(dp)? {
             return Ok(de);
@@ -149,7 +161,6 @@ impl Vlog {
         let offset = self.w_off;
         let de_bytes = self.ser(de)?;
         let dp_sz = DataPtr::serde_sz() as u64;
-        //TODO: write to disk if buffer too small
         if self.buf_sz + de_bytes.len() > self.conf.vlog_mem_buf_size
             && !self.buf.is_empty()
         {
@@ -186,6 +197,8 @@ impl Vlog {
     #[debug_ensures(self.buf.is_empty(), "buffer not flushed")]
     #[debug_ensures(self.buf_sz == 0, "buffer size not reset")]
     fn flush(&mut self) -> GhalaDbResult<()> {
+        let num = self.num;
+        debug!("vlog::flush num: {}", num);
         for (dp, de_bytes) in &self.buf {
             // write to file
             let dp_offset = dp.offset - DataPtr::serde_sz() as u64;
@@ -247,14 +260,15 @@ impl Vlog {
     #[debug_requires(!self.active, "cannot del active vlog")]
     #[debug_ensures(!self.path.exists())]
     fn delete(&self) -> GhalaDbResult<()> {
-        debug!("deleting vlog at: {}", self.path.display(),);
+        let vnum = self.num;
+        debug!("vlog::delete vlog {} path: {}", vnum, self.path.display(),);
         std::fs::remove_file(&self.path)?;
         Ok(())
     }
 }
 impl Drop for Vlog {
     fn drop(&mut self) {
-        if self.conf.vlog_mem_buf_enabled {
+        if !self.buf.is_empty() {
             self.flush().ok();
             debug_assert!(self.buf.is_empty(), "buf not empty at drop");
         }
@@ -293,9 +307,6 @@ impl VlogReader {
         let mut buf = vec![0u8; dp_sz];
         let res = self.rdr.read_exact(&mut buf);
         if let Err(e) = res {
-            //TODO: is it better to track offset and know the EOF
-            // and avoid handling this error
-            // this error might be due to something else
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 return Ok(None);
             } else {
@@ -362,6 +373,10 @@ impl VlogsMan {
     }
 
     #[debug_ensures(!self.vlogs.contains_key(&vnum))]
+    /// Remove values logs from the manager and deactivate it.
+    ///
+    /// Deactivating the vlog will earmark it for auto deletion during
+    /// Drop.
     pub fn drop_vlog(&mut self, vnum: VlogNum) -> GhalaDbResult<()> {
         if let Some(mut vlog) = self.vlogs.remove(&vnum) {
             vlog.deactivate();
@@ -407,9 +422,15 @@ impl VlogsMan {
             .ok_or_else(|| GhalaDbError::MissingVlog(dp.vlog))?;
         vlog.get(dp)
     }
+
     pub fn put(&mut self, entry: &DataEntry) -> GhalaDbResult<DataPtr> {
         let vlog = self.get_tail()?;
         vlog.put(entry)
+    }
+
+    #[allow(unused)]
+    pub fn vlogs_count(&self) -> usize {
+        self.vlogs.len()
     }
 
     /// Get candidate vlog for garbage collection.
@@ -418,13 +439,11 @@ impl VlogsMan {
     /// collected.
     ///
     /// The heuristic for picking the vlog is naive - we return the oldest
-    /// vlog. The idea is that vlog that have been recently written to should
-    /// wait for a certain amount of time before they are allowed to become
+    /// vlog. The idea is that recently updated vlogs should wait for a
+    /// certain amount of time before they are allowed to become
     /// candidates for garbage collection.
-    ///
-    /// TODO: improve heuristic
     pub fn get_gc_cand(&mut self) -> GhalaDbResult<Option<(VlogNum, PathBuf)>> {
-        if self.vlogs.len() > 3 {
+        if self.vlogs.len() > 1 {
             let vnum = self.vlogs.keys().next().unwrap();
             let path = self.base_path.join(format!("{}.vlog", vnum));
             Ok(Some((*vnum, path)))

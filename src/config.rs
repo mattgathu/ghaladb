@@ -1,7 +1,8 @@
+use bincode::{Decode, Encode};
 use typed_builder::TypedBuilder;
 
 /// Database Configuration
-#[derive(Debug, Copy, Clone, TypedBuilder)]
+#[derive(Debug, Copy, Clone, TypedBuilder, Encode, Decode)]
 pub struct DatabaseOptions {
     /// Maximum vlog size in bytes: default 1gb
     #[builder(default = 1_000_000_000)]
@@ -22,4 +23,7 @@ pub struct DatabaseOptions {
     /// enable data compression
     #[builder(default = true)]
     pub compress: bool,
+    /// keys sync interval in seconds
+    #[builder(default = 10)]
+    pub keys_sync_interval: u128,
 }

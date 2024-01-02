@@ -1,7 +1,9 @@
 on:
-  push:
-    tags:
-      - '*'
+  release:
+    types:
+      - 'published'
+    branches:
+      - 'main'
 
 name: Publish
 

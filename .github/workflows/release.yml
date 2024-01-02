@@ -2,9 +2,8 @@ on:
   push:
     branches:
       - 'main'
-      - 'auto-releases'
 
-name: Create Release 
+name: Create Release
 permissions:
   contents: write
 
@@ -27,4 +26,3 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/create_rel.sh
- 

@@ -7,7 +7,7 @@ use crate::{
     core::Bytes,
     dec::Dec,
     error::{GhalaDbError, GhalaDbResult},
-    gc::Janitor,
+    gc::GarbageCollector,
     keys::Keys,
     utils::t,
     vlog::{DataEntry, VlogsMan},
@@ -26,7 +26,7 @@ where
     /// Values logs manager
     vlogs_man: VlogsMan,
     /// Garbage Collector
-    janitor: Option<Janitor>,
+    gc: Option<GarbageCollector>,
     /// Database Configs
     opts: DatabaseOptions,
     _k: PhantomData<K>,
@@ -50,11 +50,10 @@ where
 
         let vlogs_man = VlogsMan::new(path.as_ref(), opts)?;
         let keys = Keys::from_path(keys_path, opts)?;
-        let janitor = None;
         let db = GhalaDb {
             keys,
             vlogs_man,
-            janitor,
+            gc: None,
             opts,
             _k: PhantomData,
             _v: PhantomData,
@@ -142,18 +141,18 @@ where
         if !self.opts.compact {
             return Ok(());
         }
-        if let Some(ref mut jan) = self.janitor {
-            if let Some(de) = jan.sweep(&mut self.keys)? {
-                // Janitor found a live data entry. Re-insert it.
+        if let Some(ref mut gc) = self.gc {
+            if let Some(de) = gc.sweep(&mut self.keys)? {
+                // GC found a live data entry. Re-insert it.
                 t!("gc::put_raw", self.put_raw(de.key, de.val, true))?;
             } else {
-                // Janitor has finished going through the vlog.
-                t!("vlogs_man::drop_vlog", self.vlogs_man.drop_vlog(jan.vnum()))?;
-                self.janitor = None;
+                // GC has finished going through the vlog.
+                t!("vlogs_man::drop_vlog", self.vlogs_man.drop_vlog(gc.vnum()))?;
+                self.gc = None;
             }
         } else if let Some((vnum, path)) = self.vlogs_man.get_gc_cand()? {
-            let janitor = t!("janitor::new", Janitor::new(vnum, &path))?;
-            self.janitor = Some(janitor);
+            let gc = t!("gc::new", GarbageCollector::new(vnum, &path))?;
+            self.gc = Some(gc);
         }
 
         Ok(())

@@ -10,7 +10,8 @@ ghv=$(gh release list -L 1 | awk -F" " '{print $1}')
 if [[ $pkgv != $ghv ]]; then
     echo "'$pkgv' != '$ghv' ... creating new release tag"
     # create new rel tag
-    $(gh release create "$pkgv"  --repo="$GITHUB_REPOSITORY" --title="$pkgv" --target="$GITHUB_SHA" --generate-notes)
+    url=$(gh release create "$pkgv"  --repo="$GITHUB_REPOSITORY" --title="$pkgv" --target="$GITHUB_SHA" --generate-notes)
+    echo "new release created at: $url"
 else
     echo "$pkgv == $ghv ... stopping"
 fi

@@ -1,0 +1,28 @@
+on:
+  push:
+    branches:
+      - 'main'
+
+name: Create Release
+permissions:
+  contents: write
+
+jobs:
+  create_release:
+    name: Create Release
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: "cargo check"
+        run: |
+          cargo check
+
+      - name: "create release"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash .github/create_rel.sh

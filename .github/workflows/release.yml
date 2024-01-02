@@ -5,6 +5,8 @@ on:
       - 'auto-releases'
 
 name: Create Release 
+permissions:
+  contents: write
 
 jobs:
   create_release:
@@ -21,8 +23,6 @@ jobs:
           cargo check
 
       - name: "create release"
-        permissions:
-          contents: write
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

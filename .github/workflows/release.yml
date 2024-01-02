@@ -16,7 +16,13 @@ jobs:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: "cargo check"
+        run: |
+          cargo check
+
       - name: "create release"
-        run: |-
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           bash .github/create_rel.sh
  

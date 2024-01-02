@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -o errexit
+
 pkgv=$(cargo pkgid | awk -F'[ #]' '{print "v"$2}')
 
 ghv=$(gh release list -L 1 | awk -F" " '{print $1}')

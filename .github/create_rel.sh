@@ -12,6 +12,8 @@ if [[ $pkgv != $ghv ]]; then
     # create new rel tag
     url=$(gh release create "$pkgv"  --repo="$GITHUB_REPOSITORY" --title="$pkgv" --target="$GITHUB_SHA" --generate-notes)
     echo "new release created at: $url"
+    echo "created=1" >> $GITHUB_OUTPUT
 else
     echo "$pkgv == $ghv ... stopping"
+    echo "created=0" >> $GITHUB_OUTPUT
 fi

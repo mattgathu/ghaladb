@@ -34,7 +34,7 @@ jobs:
   crates_io_publish:
     name: Publish (crates.io)
     needs: create_release
-    if: ${{ needs.create_release.outputs.created == "1" }}
+    if: ${{ needs.create_release.outputs.created == '1' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

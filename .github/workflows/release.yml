@@ -14,9 +14,10 @@ permissions:
 jobs:
   create_release:
     name: Create Release
-
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      created: ${{ steps.create_release_step.outputs.created }}
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
@@ -26,6 +27,7 @@ jobs:
           cargo check
 
       - name: "create release"
+        id: create_release_step
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -34,7 +36,7 @@ jobs:
   crates_io_publish:
     name: Publish (crates.io)
     needs: create_release
-    if: ${{ needs.create_release.outputs.created == '1' }}
+    if: needs.create_release.outputs.created == 1
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -60,6 +62,6 @@ jobs:
             publish \
             --workspace \
             --all-features \
-            --allow-branch HEAD \
+            --allow-branch main \
             --no-confirm \
             --execute

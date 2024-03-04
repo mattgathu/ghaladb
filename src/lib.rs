@@ -27,7 +27,7 @@ fn main() -> GhalaDbResult<()> {
 }
 ```
 */
-#![deny(missing_docs)]
+#![deny(missing_docs, unused)]
 #[macro_use]
 extern crate log;
 mod config;

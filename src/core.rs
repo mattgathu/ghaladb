@@ -8,16 +8,6 @@ pub type KeyRef<'a> = &'a [u8];
 pub type VlogNum = u64;
 pub type DataEntrySz = u32;
 
-pub(crate) trait MemSize {
-    fn mem_sz(&self) -> usize;
-}
-
-impl MemSize for Bytes {
-    fn mem_sz(&self) -> usize {
-        self.len()
-    }
-}
-
 /// A data pointer for data on disk.
 #[derive(
     Debug, Clone, Copy, Encode, Decode, PartialEq, Hash, PartialOrd, Ord, Eq,

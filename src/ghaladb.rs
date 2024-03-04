@@ -12,6 +12,7 @@ use crate::{
     utils::t,
     vlog::{DataEntry, VlogsMan},
 };
+use std::borrow::Borrow;
 use std::marker::PhantomData;
 use std::path::Path;
 
@@ -59,6 +60,19 @@ where
             _v: PhantomData,
         };
         Ok(db)
+    }
+
+    /// Check if a key is present in the data store.
+    ///
+    /// Returns `true` if the store contains a value for the specified key.
+    pub fn exists<Q: ?Sized>(&mut self, k: &Q) -> GhalaDbResult<bool>
+    where
+        K: Borrow<Q>,
+        Q: bincode::Encode,
+    {
+        trace!("GhalaDb::contains_key");
+        let key = Dec::ser_raw(k)?;
+        Ok(self.keys.exists(&key))
     }
 
     /// Deletes a key from the data store.
@@ -254,6 +268,18 @@ mod tests {
         let v = "world".to_owned();
         db.put(&k, &v)?;
         assert_eq!(db.get(&k)?, Some(v));
+        Ok(())
+    }
+
+    #[test]
+    fn exists() -> GhalaDbResult<()> {
+        env_logger::try_init().ok();
+        let tmp_dir = tempdir()?;
+        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let k = "hello".to_owned();
+        let v = "world".to_owned();
+        db.put(&k, &v)?;
+        assert!(db.exists(&k)?);
         Ok(())
     }
 

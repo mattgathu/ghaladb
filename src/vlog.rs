@@ -391,8 +391,13 @@ impl VlogsMan {
     #[debug_ensures(self.base_path.join(VLOG_INFO_FILE).exists())]
     fn dump_vlogs_info(&self) -> GhalaDbResult<()> {
         let path = self.base_path.join(VLOG_INFO_FILE);
-        let mut wtr =
-            BufWriter::new(OpenOptions::new().create(true).write(true).open(path)?);
+        let mut wtr = BufWriter::new(
+            OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(path)?,
+        );
         let info = VlogsInfo {
             vlogs: self.vlogs.keys().copied().collect(),
         };

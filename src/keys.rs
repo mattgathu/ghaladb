@@ -94,6 +94,7 @@ impl Keys {
             OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&self.path)?,
         );
         let bytes = Dec::ser_raw(&self)?;

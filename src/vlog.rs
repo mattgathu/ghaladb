@@ -185,6 +185,7 @@ impl Vlog {
             Ok(dp)
         } else {
             let dp = t!("vlog::write_entry", self.write_de(entry))?;
+            // why do we always flush here
             self.wtr.flush()?;
             Ok(dp)
         }
@@ -390,8 +391,13 @@ impl VlogsMan {
     #[debug_ensures(self.base_path.join(VLOG_INFO_FILE).exists())]
     fn dump_vlogs_info(&self) -> GhalaDbResult<()> {
         let path = self.base_path.join(VLOG_INFO_FILE);
-        let mut wtr =
-            BufWriter::new(OpenOptions::new().create(true).write(true).open(path)?);
+        let mut wtr = BufWriter::new(
+            OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(path)?,
+        );
         let info = VlogsInfo {
             vlogs: self.vlogs.keys().copied().collect(),
         };
@@ -461,6 +467,10 @@ impl VlogsMan {
         Ok(())
     }
 
+    /// Get the current active vlog
+    ///
+    /// Get the current active vlog or create and return a new one if the
+    /// current has reached it's max size.
     fn get_tail(&mut self) -> GhalaDbResult<&mut Vlog> {
         if let Some(vlog) = self.vlogs.get_mut(&self.seq) {
             if vlog.size() > self.conf.max_vlog_size {

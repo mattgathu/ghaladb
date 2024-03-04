@@ -56,6 +56,10 @@ impl Keys {
         Ok(keys)
     }
 
+    pub fn exists(&self, key: KeyRef) -> bool {
+        self.map.contains_key(key)
+    }
+
     pub fn delete(&mut self, key: KeyRef) -> GhalaDbResult<()> {
         trace!("Keys::delete");
         self.map.remove(key);
@@ -90,6 +94,7 @@ impl Keys {
             OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&self.path)?,
         );
         let bytes = Dec::ser_raw(&self)?;

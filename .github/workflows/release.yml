@@ -19,7 +19,7 @@ jobs:
     outputs:
       created: ${{ steps.create_release_step.outputs.created }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
       - name: "cargo check"
@@ -40,12 +40,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
       - name: cargo-release Cache
         id: cargo_release_cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-release
           key: ${{ runner.os }}-cargo-release

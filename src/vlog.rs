@@ -505,7 +505,6 @@ impl Drop for VlogsMan {
 mod tests {
 
     use super::*;
-    use crate::core::FixtureGen;
     use tempfile::{tempdir, TempDir};
     fn init_vlog(temp_dir: &TempDir) -> GhalaDbResult<Vlog> {
         let file_path = temp_dir.path().join("test_vlog.db");

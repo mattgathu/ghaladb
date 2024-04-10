@@ -1,10 +1,8 @@
-use bincode::Decode;
-use bincode::Encode;
+use bincode::{Decode, Encode};
 
-use crate::core::DataPtr;
 use crate::{
     config::DatabaseOptions,
-    core::Bytes,
+    core::{Bytes, DataPtr},
     dec::Dec,
     error::{GhalaDbError, GhalaDbResult},
     gc::GarbageCollector,
@@ -12,9 +10,7 @@ use crate::{
     utils::t,
     vlog::{DataEntry, VlogsMan},
 };
-use std::borrow::Borrow;
-use std::marker::PhantomData;
-use std::path::Path;
+use std::{borrow::Borrow, marker::PhantomData, path::Path};
 
 /// An LSM key value store with keys and values separation.
 pub struct GhalaDb<K, V>
@@ -78,7 +74,11 @@ where
     /// Deletes a key from the data store.
     ///
     /// We simply remove the key from the in-memory keys table.
-    pub fn delete(&mut self, key: &K) -> GhalaDbResult<()> {
+    pub fn delete<Q: ?Sized>(&mut self, key: &Q) -> GhalaDbResult<()>
+    where
+        K: Borrow<Q>,
+        Q: bincode::Encode,
+    {
         trace!("GhalaDb::delete");
         let key = Dec::ser_raw(key)?;
         t!("keys::del", self.keys.delete(&key))?;
@@ -91,7 +91,11 @@ where
     /// We first do a data pointer lookup in the in-memory keys table
     /// and then use the pointer to read the actual data entry from a
     /// vlog on disk.
-    pub fn get(&mut self, key: &K) -> GhalaDbResult<Option<V>> {
+    pub fn get<Q: ?Sized>(&mut self, key: &Q) -> GhalaDbResult<Option<V>>
+    where
+        K: Borrow<Q>,
+        Q: bincode::Encode,
+    {
         trace!("GhalaDb::get");
         let key = Dec::ser_raw(key)?;
         if let Some(dp) = self.keys.get(&key) {
@@ -104,7 +108,11 @@ where
     }
 
     /// Inserts a key-value pair into the data store.
-    pub fn put(&mut self, k: &K, v: &V) -> GhalaDbResult<()> {
+    pub fn put<Q: ?Sized>(&mut self, k: &Q, v: &V) -> GhalaDbResult<()>
+    where
+        K: Borrow<Q>,
+        Q: bincode::Encode,
+    {
         let key = Dec::ser_raw(k)?;
         let val = Dec::ser_raw(v)?;
         self.put_raw(key, val, false)
@@ -263,7 +271,7 @@ mod tests {
     fn key_lookup() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
         let k = "hello".to_owned();
         let v = "world".to_owned();
         db.put(&k, &v)?;
@@ -275,7 +283,7 @@ mod tests {
     fn exists() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
         let k = "hello".to_owned();
         let v = "world".to_owned();
         db.put(&k, &v)?;
@@ -287,7 +295,7 @@ mod tests {
     fn put_delete_get() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
         let k = "hello".to_owned();
         let v = "world".to_owned();
         db.put(&k, &v)?;
@@ -302,14 +310,14 @@ mod tests {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
         info!("DB init");
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
         let k = "hello".to_owned();
         let v = "world".to_owned();
         db.put(&k, &v)?;
         info!("dropping DB");
         drop(db);
         info!("Reloading DB");
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
         assert_eq!(db.get(&k)?, Some(v));
         Ok(())
     }
@@ -317,7 +325,7 @@ mod tests {
     #[test]
     fn kv_iter() -> GhalaDbResult<()> {
         let tmp_dir = tempdir()?;
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
 
         db.put(&s!("king"), &s!("queen"))?;
         db.put(&s!("man"), &s!("woman"))?;
@@ -329,7 +337,7 @@ mod tests {
         assert!(entries.contains(&(s!("man"), s!("woman"))));
 
         let tmp_dir = tempdir()?;
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
         for (k, v) in [("bee", "honey"), ("fish", "water")] {
             db.put(&s!(k), &s!(v))?;
         }
@@ -345,7 +353,7 @@ mod tests {
     fn get_from_ssm() -> GhalaDbResult<()> {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
-        let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+        let mut db: GhalaDb<String, String> = GhalaDb::new(tmp_dir.path(), None)?;
 
         db.put(&s!("left"), &s!("right"))?;
         db.put(&s!("man"), &s!("woman"))?;
@@ -358,7 +366,8 @@ mod tests {
         env_logger::try_init().ok();
         let tmp_dir = tempdir()?;
         let opts = DatabaseOptions::builder().sync(false).build();
-        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
+        let mut db: GhalaDb<String, String> =
+            GhalaDb::new(tmp_dir.path(), Some(opts))?;
         for (k, v) in dummy_vals() {
             db.put(&k, &v)?;
         }
@@ -378,7 +387,8 @@ mod tests {
             .max_vlog_size(4 * 1024)
             .sync(false)
             .build();
-        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
+        let mut db: GhalaDb<Vec<u8>, Vec<u8>> =
+            GhalaDb::new(tmp_dir.path(), Some(opts))?;
         let data = (0..100).map(|_| Bytes::gen()).collect::<Vec<_>>();
         for entry in &data {
             db.put(entry, entry)?;
@@ -404,7 +414,8 @@ mod tests {
             .max_vlog_size(4 * 1024)
             .sync(false)
             .build();
-        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
+        let mut db: GhalaDb<Vec<u8>, Vec<u8>> =
+            GhalaDb::new(tmp_dir.path(), Some(opts))?;
         let data = (0..100).map(|_| Bytes::gen()).collect::<Vec<_>>();
         for entry in &data {
             db.put(entry, entry)?;
@@ -429,7 +440,8 @@ mod tests {
         let unchanged: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
         let deleted: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
         let updated: HashSet<Bytes> = (0..1000).map(|_| Bytes::gen()).collect();
-        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
+        let mut db: GhalaDb<Vec<u8>, Vec<u8>> =
+            GhalaDb::new(tmp_dir.path(), Some(opts))?;
         assert!(unchanged.is_disjoint(&deleted));
         assert!(unchanged.is_disjoint(&updated));
         assert!(deleted.is_disjoint(&updated));
@@ -462,7 +474,8 @@ mod tests {
             )
         }
         drop(db);
-        let mut db = GhalaDb::new(tmp_dir.path(), Some(opts))?;
+        let mut db: GhalaDb<Vec<u8>, Vec<u8>> =
+            GhalaDb::new(tmp_dir.path(), Some(opts))?;
         for k in &unchanged {
             assert_eq!(db.get(k)?, Some(k.clone()))
         }

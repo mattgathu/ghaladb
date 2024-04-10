@@ -18,8 +18,9 @@ use std::{
 /// Keys
 ///
 /// This is an in-memory map that stores keys and their data pointer.
-/// It is automatically synced to disk during datastore shutdown (when GhalaDb is dropped)
-/// but it can also be synced manually using the `sync` method of GhalaDb.
+/// It is automatically synced to disk during datastore shutdown (when GhalaDb
+/// is dropped) but it can also be synced manually using the `sync` method of
+/// GhalaDb.
 #[derive(Encode, Decode, Debug)]
 pub(crate) struct Keys {
     map: BTreeMap<Bytes, DataPtr>,

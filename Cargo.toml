@@ -1,6 +1,6 @@
 [package]
 name = "ghaladb"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Matt Gathu <mattgathu@gmail.com>"]
 edition = "2021"
 description = "LSM tree based key value store with keys and values separation."

@@ -9,7 +9,7 @@ fn gen_bytes(rng: &mut ThreadRng, len: usize) -> Vec<u8> {
 fn main() -> GhalaDbResult<()> {
     let mut rng = rand::thread_rng();
     let tmp_dir = tempdir()?;
-    let mut db = GhalaDb::new(tmp_dir.path(), None)?;
+    let mut db: GhalaDb<Vec<u8>, Vec<u8>> = GhalaDb::new(tmp_dir.path(), None)?;
     let mut data = (0usize..1_000_000)
         .map(|_| {
             let (k, v) =
@@ -18,7 +18,7 @@ fn main() -> GhalaDbResult<()> {
         })
         .collect::<Vec<_>>();
     for (k, v) in &data {
-        db.put(k,v)?;
+        db.put(k, v)?;
     }
     for (k, _) in &data {
         db.get(k)?;

@@ -1,5 +1,4 @@
 //! GhalaDb's errors module.
-//!
 use crate::core::VlogNum;
 use std::path::PathBuf;
 use thiserror::Error;
